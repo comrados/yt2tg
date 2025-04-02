@@ -122,8 +122,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                 size = os.path.getsize(filename)
                 if size <= 2 * 1024 * 1024 * 1024:
                     title = info.get("title", "Untitled")
-                    description = info.get("description", "")
-                    caption = f"🎬 *{title}*\n\n{description[:1024]}"  # Telegram max caption length = 1024
+                    caption = f"🎬 *{title}*"
                     print(f"[SEND] Sending video to channel {TARGET_CHANNEL} from user {update.effective_user.id} ({quality}p)")
                     await context.bot.send_video(
                         chat_id=TARGET_CHANNEL,
@@ -140,6 +139,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 
     await msg.edit_text("❌ Couldn't reduce the video size below 2GB.")
     print(f"[FAIL] Video too big even at 144p — user {update.effective_user.id}")
+
 
 # Worker loop: one-by-one video handling
 async def worker_loop(app):
