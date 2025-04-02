@@ -65,7 +65,7 @@ Only users listed in `allowed_users` can use the bot.
 ```bash
 sudo apt update
 sudo apt install -y docker.io
-git clone https://github.com/your-username/yt2tg-bot.git
+git clone https://github.com/comrados/yt2tg.git
 cd yt2tg-bot
 docker compose up --build -d
 ```
