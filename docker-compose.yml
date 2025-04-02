@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  ytbot:
+    build: .
+    container_name: yt2tg
+    restart: always
+    volumes:
+      - ./config.json:/app/config.json:ro
+    environment:
+      - TZ=Europe/Berlin

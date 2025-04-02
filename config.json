@@ -1,0 +1,8 @@
+{
+    "bot_token": "BOT_TOKEN",
+    "allowed_users": [
+        987654321,
+        123456789
+    ],
+    "target_channel": -123456789
+}
