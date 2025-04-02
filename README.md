@@ -41,7 +41,15 @@ A Telegram bot that downloads YouTube videos (360p or lower if needed) and sends
 }
 ```
 
-## Running with Docker Compose
+## Running with Docker Compose (Debian)
+
+Make sure you have Docker Compose installed.
+
+```
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+docker-compose --version
+```
 
 First time:
 ```bash
@@ -60,14 +68,14 @@ docker compose restart
 
 Only users listed in `allowed_users` can use the bot.
 
-## GCP Quickstart (Ubuntu)
+## GCP Quickstart (Debian)
 
 ```bash
 sudo apt update
 sudo apt install -y docker.io
 git clone https://github.com/comrados/yt2tg.git
 cd yt2tg-bot
-docker compose up --build -d
+docker-compose up --build -d
 ```
 
 ## License

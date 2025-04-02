@@ -101,7 +101,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 
     for quality in quality_list:
         try:
-            filename = f"video.mp4"
+            filename = "video.mp4"
             if os.path.exists(filename):
                 os.remove(filename)
 
@@ -109,17 +109,28 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                 'format': f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]',
                 'outtmpl': filename,
                 'quiet': True,
-                'merge_output_format': 'mp4'
+                'merge_output_format': 'mp4',
+                'noplaylist': True,
+                'skip_download': False,
+                'no_warnings': True
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+                info = ydl.extract_info(url, download=True)
 
             if os.path.exists(filename):
                 size = os.path.getsize(filename)
-                if size <= 2 * 1024 * 1024 * 1024:  # 2GB limit
+                if size <= 2 * 1024 * 1024 * 1024:
+                    title = info.get("title", "Untitled")
+                    description = info.get("description", "")
+                    caption = f"🎬 *{title}*\n\n{description[:1024]}"  # Telegram max caption length = 1024
                     print(f"[SEND] Sending video to channel {TARGET_CHANNEL} from user {update.effective_user.id} ({quality}p)")
-                    await context.bot.send_video(chat_id=TARGET_CHANNEL, video=open(filename, 'rb'))
+                    await context.bot.send_video(
+                        chat_id=TARGET_CHANNEL,
+                        video=open(filename, 'rb'),
+                        caption=caption,
+                        parse_mode='Markdown'
+                    )
                     await msg.edit_text(f"✅ Sent to channel in {quality}p")
                     os.remove(filename)
                     return
