@@ -2,6 +2,7 @@ version: "3.9"
 
 services:
   ytbot:
+    container_name: yt2tg
     build: .
     restart: always
     mem_limit: 512m
