@@ -158,31 +158,43 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         # Step 3: send to Telegram
         if os.path.exists(filename):
             size = os.path.getsize(filename)
+            log.info(f"[CHECK] File exists: {filename}, size: {size} bytes")
             caption = f"🎬 *{title}*"
 
             if size <= 2 * 1024 * 1024 * 1024:
                 log.info(f"[SEND] Sending as video to {TARGET_CHANNEL} ({size // 1024**2} MB)")
-                await context.bot.send_video(
-                    chat_id=TARGET_CHANNEL,
-                    video=open(filename, 'rb'),
-                    caption=caption,
-                    parse_mode='Markdown'
-                )
-                await update.message.reply_text("✅ Sent to channel as video (360p)")
+                try:
+                    await context.bot.send_video(
+                        chat_id=TARGET_CHANNEL,
+                        video=open(filename, 'rb'),
+                        caption=caption,
+                        parse_mode='Markdown'
+                    )
+                    await update.message.reply_text("✅ Sent to channel as video (360p)")
+                    log.info(f"[DONE] Confirmed sent as video ({size // 1024**2} MB)")
+                except Exception as e:
+                    log.error(f"[ERROR] Failed to send video: {e}")
+                    await update.message.reply_text("❌ Failed to send video.")
             elif size <= 4 * 1024 * 1024 * 1024:
                 log.info(f"[SEND] Sending as document to {TARGET_CHANNEL} ({size // 1024**2} MB)")
-                await context.bot.send_document(
-                    chat_id=TARGET_CHANNEL,
-                    document=open(filename, 'rb'),
-                    caption=caption,
-                    parse_mode='Markdown'
-                )
-                await update.message.reply_text("✅ Sent to channel as document (360p)")
+                try:
+                    await context.bot.send_document(
+                        chat_id=TARGET_CHANNEL,
+                        document=open(filename, 'rb'),
+                        caption=caption,
+                        parse_mode='Markdown'
+                    )
+                    await update.message.reply_text("✅ Sent to channel as document (360p)")
+                    log.info(f"[DONE] Confirmed sent as document ({size // 1024**2} MB)")
+                except Exception as e:
+                    log.error(f"[ERROR] Failed to send document: {e}")
+                    await update.message.reply_text("❌ Failed to send document.")
             else:
                 await update.message.reply_text("❌ Video is larger than 4GB. Cannot upload.")
                 log.error(f"[FAIL] File too large even for document — user {update.effective_user.id}")
         else:
             await update.message.reply_text("❌ Download failed: file not found.")
+            log.error("[ERROR] File was expected but not found on disk.")
 
     except Exception as e:
         log.error(f"[ERROR] Failed to download/send: {e}")
@@ -190,7 +202,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
     finally:
         if os.path.exists(filename):
             os.remove(filename)
-
+            log.info(f"[CLEANUP] Removed file: {filename}")
 
 # Worker loop: one-by-one video handling
 async def worker_loop(app):
