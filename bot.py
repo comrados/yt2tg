@@ -102,7 +102,7 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text if update.message else None
     log.info(f"[MSG] From user {user.id} in chat {chat.id}: {text}")
 
-# Process the video: get size, download in 360p with bitrate filter, and send
+# Process the video: get size, download in 360p with bitrate filter, and send as document only
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     filename = "video.mp4"
 
@@ -123,7 +123,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         formats = info.get("formats", [])
         filesize_bytes = None
 
-        # Try to find filesize estimate for 360p mp4 format
+        # Estimate size for 360p mp4
         for f in formats:
             if (
                 f.get("height") == 360 and
@@ -143,7 +143,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             parse_mode="Markdown"
         )
 
-        # Step 2: download with bitrate limit fallback
+        # Step 2: download
         ydl_opts = {
             'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]',
             'outtmpl': filename,
@@ -153,54 +153,15 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            ydl.download([url])
 
-        # Step 3: send to Telegram
+        # Step 3: send as document
         if os.path.exists(filename):
             size = os.path.getsize(filename)
             log.info(f"[CHECK] File exists: {filename}, size: {size} bytes")
             caption = f"🎬 *{title}*"
 
-            if size <= 2 * 1024 * 1024 * 1024:
-                log.info(f"[SEND] Sending as video to {TARGET_CHANNEL} ({size // 1024**2} MB)")
-                try:
-                    with open(filename, 'rb') as f:
-                        await context.bot.send_video(
-                            chat_id=TARGET_CHANNEL,
-                            video=f,
-                            caption=caption,
-                            parse_mode='Markdown',
-                            api_kwargs={"stream": True},
-                            write_timeout=60,
-                            read_timeout=60,
-                            connect_timeout=30
-                        )
-                    await update.message.reply_text("✅ Sent to channel as video (360p)")
-                    log.info(f"[DONE] Confirmed sent as video ({size // 1024**2} MB)")
-                except Exception as e:
-                    if "413" in str(e):
-                        log.warning(f"[RETRY] Video too large, retrying as document...")
-                        try:
-                            with open(filename, 'rb') as f:
-                                await context.bot.send_document(
-                                    chat_id=TARGET_CHANNEL,
-                                    document=f,
-                                    caption=caption,
-                                    parse_mode='Markdown',
-                                    api_kwargs={"stream": True},
-                                    write_timeout=60,
-                                    read_timeout=60,
-                                    connect_timeout=30
-                                )
-                            await update.message.reply_text("✅ Sent to channel as document (fallback)")
-                            log.info(f"[DONE] Sent as document fallback ({size // 1024**2} MB)")
-                        except Exception as ex:
-                            log.error(f"[FAIL] Retry as document failed: {ex}")
-                            await update.message.reply_text("❌ Failed to send as document fallback.")
-                    else:
-                        log.error(f"[ERROR] Failed to send video: {e}")
-                        await update.message.reply_text("❌ Failed to send video.")
-            elif size <= 4 * 1024 * 1024 * 1024:
+            if size <= 4 * 1024 * 1024 * 1024:
                 log.info(f"[SEND] Sending as document to {TARGET_CHANNEL} ({size // 1024**2} MB)")
                 try:
                     with open(filename, 'rb') as f:
@@ -215,7 +176,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                             connect_timeout=30
                         )
                     await update.message.reply_text("✅ Sent to channel as document (360p)")
-                    log.info(f"[DONE] Confirmed sent as document ({size // 1024**2} MB)")
+                    log.info(f"[DONE] Sent as document ({size // 1024**2} MB)")
                 except Exception as e:
                     log.error(f"[ERROR] Failed to send document: {e}")
                     await update.message.reply_text("❌ Failed to send document.")
@@ -233,7 +194,6 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if os.path.exists(filename):
             os.remove(filename)
             log.info(f"[CLEANUP] Removed file: {filename}")
-
 
 # Worker loop: one-by-one video handling
 async def worker_loop(app):
