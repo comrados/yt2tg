@@ -14,6 +14,14 @@ from telegram.ext import (
 )
 import yt_dlp
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
+
 # Load config
 with open("config.json") as f:
     config = json.load(f)
@@ -22,7 +30,6 @@ BOT_TOKEN = config["bot_token"]
 ALLOWED_USERS = set(config["allowed_users"])
 TARGET_CHANNEL = config["target_channel"]
 
-quality_list = [360, 240, 144]
 task_queue = asyncio.Queue()
 
 # Access check
@@ -54,7 +61,7 @@ def clean_youtube_url(url: str) -> str | None:
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    print(f"[ID] /id from user {user_id} in chat {chat_id}")
+    log.info(f"[ID] /id from user {user_id} in chat {chat_id}")
     await update.message.reply_text(
         f"👤 Your Telegram user ID: `{user_id}`\n💬 Chat ID: `{chat_id}`",
         parse_mode='Markdown'
@@ -63,7 +70,7 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /download <link> — add to queue
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
-        print(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
+        log.info(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
         await update.message.reply_text("🚫 You're not allowed to use this bot.")
         return
 
@@ -77,7 +84,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid YouTube link.")
         return
 
-    print(f"[QUEUE] New task from user {update.effective_user.id} — URL: {clean_url}")
+    log.info(f"[QUEUE] New task from user {update.effective_user.id} — URL: {clean_url}")
     await update.message.reply_text("✅ Added to the queue.")
     await task_queue.put((update, context, clean_url))
 
@@ -85,7 +92,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def debug_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.forward_from_chat:
         chat_id = update.message.forward_from_chat.id
-        print(f"[FORWARD] Forwarded from chat ID: {chat_id}")
+        log.info(f"[FORWARD] Forwarded from chat ID: {chat_id}")
         await update.message.reply_text(f"📣 Channel ID: `{chat_id}`", parse_mode='Markdown')
 
 # Log any message to console
@@ -93,52 +100,96 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     text = update.message.text if update.message else None
-    print(f"[MSG] From user {user.id} in chat {chat.id}: {text}")
+    log.info(f"[MSG] From user {user.id} in chat {chat.id}: {text}")
 
-# Process the video: download, check size, send
+# Process the video: get size, download in 360p with bitrate filter, and send
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    msg = await update.message.reply_text("⏳ Downloading video...")
+    filename = "video.mp4"
 
-    for quality in quality_list:
-        try:
-            filename = "video.mp4"
-            if os.path.exists(filename):
-                os.remove(filename)
+    try:
+        if os.path.exists(filename):
+            os.remove(filename)
 
-            ydl_opts = {
-                'format': f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]',
-                'outtmpl': filename,
-                'quiet': True,
-                'merge_output_format': 'mp4',
-                'noplaylist': True,
-                'skip_download': False,
-                'no_warnings': True
-            }
+        # Step 1: get info without download
+        ydl_opts_info = {
+            'quiet': True,
+            'skip_download': True
+        }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
 
-            if os.path.exists(filename):
-                size = os.path.getsize(filename)
-                if size <= 2 * 1024 * 1024 * 1024:
-                    title = info.get("title", "Untitled")
-                    caption = f"🎬 *{title}*"
-                    print(f"[SEND] Sending video to channel {TARGET_CHANNEL} from user {update.effective_user.id} ({quality}p)")
-                    await context.bot.send_video(
-                        chat_id=TARGET_CHANNEL,
-                        video=open(filename, 'rb'),
-                        caption=caption,
-                        parse_mode='Markdown'
-                    )
-                    await msg.edit_text(f"✅ Sent to channel in {quality}p")
-                    os.remove(filename)
-                    return
-        except Exception as e:
-            print(f"[ERROR] Download error at {quality}p: {e}")
-            await update.message.reply_text(f"⚠️ Error at {quality}p: {e}")
+        title = info.get("title", "Untitled")
+        formats = info.get("formats", [])
+        filesize_bytes = None
 
-    await msg.edit_text("❌ Couldn't reduce the video size below 2GB.")
-    print(f"[FAIL] Video too big even at 144p — user {update.effective_user.id}")
+        # Try to find filesize estimate for 360p mp4 format
+        for f in formats:
+            if (
+                f.get("height") == 360 and
+                f.get("ext") == "mp4" and
+                not f.get("format_note", "").startswith("DASH")
+            ):
+                filesize_bytes = f.get("filesize") or f.get("filesize_approx")
+                if filesize_bytes:
+                    break
+
+        if not filesize_bytes:
+            filesize_bytes = info.get("filesize") or info.get("filesize_approx")
+
+        size_gb = round((filesize_bytes or 0) / (1024 ** 3), 2)
+        await update.message.reply_text(
+            f"⏳ Downloading video (360p)... *{size_gb} GB*",
+            parse_mode="Markdown"
+        )
+
+        # Step 2: download with bitrate limit fallback
+        ydl_opts = {
+            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]',
+            'outtmpl': filename,
+            'quiet': True,
+            'noplaylist': True,
+            'no_warnings': True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        # Step 3: send to Telegram
+        if os.path.exists(filename):
+            size = os.path.getsize(filename)
+            caption = f"🎬 *{title}*"
+
+            if size <= 2 * 1024 * 1024 * 1024:
+                log.info(f"[SEND] Sending as video to {TARGET_CHANNEL} ({size // 1024**2} MB)")
+                await context.bot.send_video(
+                    chat_id=TARGET_CHANNEL,
+                    video=open(filename, 'rb'),
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+                await update.message.reply_text("✅ Sent to channel as video (360p)")
+            elif size <= 4 * 1024 * 1024 * 1024:
+                log.info(f"[SEND] Sending as document to {TARGET_CHANNEL} ({size // 1024**2} MB)")
+                await context.bot.send_document(
+                    chat_id=TARGET_CHANNEL,
+                    document=open(filename, 'rb'),
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+                await update.message.reply_text("✅ Sent to channel as document (360p)")
+            else:
+                await update.message.reply_text("❌ Video is larger than 4GB. Cannot upload.")
+                log.error(f"[FAIL] File too large even for document — user {update.effective_user.id}")
+        else:
+            await update.message.reply_text("❌ Download failed: file not found.")
+
+    except Exception as e:
+        log.error(f"[ERROR] Failed to download/send: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
 
 
 # Worker loop: one-by-one video handling
@@ -148,7 +199,7 @@ async def worker_loop(app):
         try:
             await process_video(update, context, url)
         except Exception as e:
-            print(f"[ERROR] Worker exception: {e}")
+            log.error(f"[ERROR] Worker exception: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
         finally:
             task_queue.task_done()
@@ -171,5 +222,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.FORWARDED, debug_forward))
     app.add_handler(MessageHandler(filters.ALL, log_message))  # for logging everything
 
-    print("✅ Bot started and polling...")
+    log.info("✅ Bot started and polling...")
     app.run_polling()
