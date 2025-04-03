@@ -150,6 +150,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True,
+            'ratelimit': 2 * 1024 * 1024,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -164,12 +165,17 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             if size <= 2 * 1024 * 1024 * 1024:
                 log.info(f"[SEND] Sending as video to {TARGET_CHANNEL} ({size // 1024**2} MB)")
                 try:
-                    await context.bot.send_video(
-                        chat_id=TARGET_CHANNEL,
-                        video=open(filename, 'rb'),
-                        caption=caption,
-                        parse_mode='Markdown'
-                    )
+                    with open(filename, 'rb') as f:
+                        await context.bot.send_video(
+                            chat_id=TARGET_CHANNEL,
+                            video=f,
+                            caption=caption,
+                            parse_mode='Markdown',
+                            api_kwargs={"stream": True},
+                            write_timeout=60,
+                            read_timeout=60,
+                            connect_timeout=30
+                        )
                     await update.message.reply_text("✅ Sent to channel as video (360p)")
                     log.info(f"[DONE] Confirmed sent as video ({size // 1024**2} MB)")
                 except Exception as e:
@@ -178,12 +184,17 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             elif size <= 4 * 1024 * 1024 * 1024:
                 log.info(f"[SEND] Sending as document to {TARGET_CHANNEL} ({size // 1024**2} MB)")
                 try:
-                    await context.bot.send_document(
-                        chat_id=TARGET_CHANNEL,
-                        document=open(filename, 'rb'),
-                        caption=caption,
-                        parse_mode='Markdown'
-                    )
+                    with open(filename, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id=TARGET_CHANNEL,
+                            document=f,
+                            caption=caption,
+                            parse_mode='Markdown',
+                            api_kwargs={"stream": True},
+                            write_timeout=60,
+                            read_timeout=60,
+                            connect_timeout=30
+                        )
                     await update.message.reply_text("✅ Sent to channel as document (360p)")
                     log.info(f"[DONE] Confirmed sent as document ({size // 1024**2} MB)")
                 except Exception as e:

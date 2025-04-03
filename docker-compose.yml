@@ -3,8 +3,9 @@ version: "3.9"
 services:
   ytbot:
     build: .
-    container_name: yt2tg
     restart: always
+    mem_limit: 512m
+    memswap_limit: 1g
     volumes:
       - ./config.json:/app/config.json:ro
     environment:
