@@ -150,7 +150,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True,
-            'ratelimit': 2 * 1024 * 1024,
+            #'ratelimit': 2 * 1024 * 1024,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
