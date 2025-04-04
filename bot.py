@@ -49,9 +49,13 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_s
     output_paths: list[str] = []
 
     log.info(f"[SPLIT] Analyzing video: {input_path}")
+
+    # Get total video duration
     result = subprocess.run(
         ['ffmpeg', '-i', input_path],
-        stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True
+        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        text=True
     )
     match = re.search(r'Duration: (\d+):(\d+):(\d+.\d+)', result.stderr)
     if not match:
@@ -61,32 +65,36 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_s
     total_duration: int = int(h * 3600 + m * 60 + s)
     log.info(f"[SPLIT] Video duration: {total_duration} seconds")
 
+    # Get total file size
     file_size: int = os.path.getsize(input_path)
     file_size_mb: float = file_size / (1024 * 1024)
     log.info(f"[SPLIT] File size: {file_size_mb:.2f} MB")
 
+    # Determine number of equal parts
     chunks_count: int = math.ceil(file_size_mb / max_size_mb)
-    chunk_duration: int = math.ceil(total_duration / chunks_count)
-    log.info(f"[SPLIT] Splitting into {chunks_count} parts, ~{chunk_duration}s each (+{overlap_sec}s overlap)")
+    base_chunk_duration: float = total_duration / chunks_count
+    log.info(f"[SPLIT] Targeting {chunks_count} equal parts of ~{base_chunk_duration:.2f} seconds each (+{overlap_sec}s overlap)")
 
     for i in range(chunks_count):
-        start_time: int = max(i * chunk_duration - overlap_sec * i, 0)
+        start_time: float = max(i * base_chunk_duration - overlap_sec * i, 0)
+        duration: float = base_chunk_duration + (overlap_sec if i < chunks_count - 1 else 0)
+
         output_file: str = os.path.join(temp_dir, f"part_{i + 1}.mp4")
 
         cmd = [
             'ffmpeg', '-y',
             '-ss', str(start_time),
             '-i', input_path,
-            '-t', str(chunk_duration + overlap_sec),
+            '-t', str(duration),
             '-c', 'copy',
             output_file
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         output_paths.append(output_file)
-        log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {output_file}")
+        log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {output_file} "
+                 f"(start: {start_time:.2f}s, duration: {duration:.2f}s)")
 
     return output_paths
-
 
 # -------------------------------
 # Utils
@@ -215,30 +223,32 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             for idx, part_path in enumerate(parts, start=1):
                 caption_part = f"🎬 *{title}* ({idx}/{total})"
                 with open(part_path, 'rb') as part_file:
-                    await context.bot.send_document(
+                    await context.bot.send_video(
                         chat_id=TARGET_CHANNEL,
-                        document=part_file,
+                        video=part_file,
                         caption=caption_part,
-                        parse_mode='Markdown'
+                        parse_mode='Markdown',
+                        supports_streaming=True
                     )
-                os.remove(part_path)
                 log.info(f"[SEND] Sent part {idx}/{total}")
+                os.remove(part_path)
+                log.info(f"[CLEANUP] Removed part: {idx}/{total}")
 
             await update.message.reply_text("✅ All parts sent.")
         else:
             caption: str = f"🎬 *{title}*"
             with open(filename, 'rb') as f:
-                await context.bot.send_document(
+                await context.bot.send_video(
                     chat_id=TARGET_CHANNEL,
-                    document=f,
+                    video=f,
                     caption=caption,
                     parse_mode='Markdown',
-                    api_kwargs={"stream": True},
+                    supports_streaming=True,
                     write_timeout=60,
                     read_timeout=60,
                     connect_timeout=30
                 )
-            await update.message.reply_text("✅ Sent to channel as document (360p)")
+            await update.message.reply_text("✅ Sent to channel as video (360p)")
 
     except Exception as e:
         log.error(f"[ERROR] Failed to process video: {e}")
