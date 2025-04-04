@@ -12,7 +12,7 @@ from typing import Optional
 
 from urllib.parse import urlparse, parse_qs
 
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -138,7 +138,6 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parse_mode='Markdown'
     )
 
-
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         log.info(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
@@ -156,9 +155,12 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     log.info(f"[QUEUE] New task from user {update.effective_user.id} — URL: {clean_url}")
-    await update.message.reply_text("✅ Added to the queue.")
-    await task_queue.put((update, context, clean_url))
 
+    # 🔄 Single status message
+    status_message = await update.message.reply_text("✅ Added to the queue...", parse_mode="Markdown")
+
+    # Pass status_message into the queue
+    await task_queue.put((update, context, clean_url, status_message))
 
 async def debug_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.forward_from_chat:
@@ -178,7 +180,7 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Core video logic
 # -------------------------------
 
-async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_message: Message) -> None:
     filename: str = "video.mp4"
 
     try:
@@ -191,9 +193,9 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             info = ydl.extract_info(url, download=False)
 
         title: str = info.get("title", "Untitled")
-        await update.message.reply_text("⏳ Downloading video (360p)...", parse_mode="Markdown")
 
         # Step 2: Download the video in 360p
+        await status_message.edit_text("⏬ Downloading video (360p)...", parse_mode="Markdown")
         ydl_opts = {
             'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]',
             'outtmpl': filename,
@@ -206,21 +208,22 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 
         # Step 3: Verify file exists
         if not os.path.exists(filename):
-            await update.message.reply_text("❌ Download failed: file not found.")
+            await status_message.edit_text("❌ Download failed: file not found.", parse_mode="Markdown")
             return
 
         # Step 4: Check file size
         size_bytes: int = os.path.getsize(filename)
         size_mb: float = round(size_bytes / (1024 * 1024), 1)
-        await update.message.reply_text(f"📦 File size: *{size_mb} MB*", parse_mode="Markdown")
 
         # Step 5: Split and send or send directly
         if size_bytes > 50 * 1024 * 1024:
+            await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
+
             parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=49, overlap_sec=5)
             total: int = len(parts)
-            await update.message.reply_text(f"🔪 Splitting into {total} parts...")
 
             for idx, part_path in enumerate(parts, start=1):
+                await status_message.edit_text(f"📤 Sending part {idx}/{total}...", parse_mode="Markdown")
                 caption_part = f"🎬 *{title}* ({idx}/{total})"
                 with open(part_path, 'rb') as part_file:
                     await context.bot.send_video(
@@ -230,12 +233,14 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                         parse_mode='Markdown',
                         supports_streaming=True
                     )
-                log.info(f"[SEND] Sent part {idx}/{total}")
                 os.remove(part_path)
+                log.info(f"[SEND] Sent part {idx}/{total}")
                 log.info(f"[CLEANUP] Removed part: {idx}/{total}")
 
-            await update.message.reply_text("✅ All parts sent.")
+            await status_message.edit_text("✅ All parts sent.", parse_mode="Markdown")
         else:
+            await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Sending...", parse_mode="Markdown")
+
             caption: str = f"🎬 *{title}*"
             with open(filename, 'rb') as f:
                 await context.bot.send_video(
@@ -248,36 +253,36 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                     read_timeout=60,
                     connect_timeout=30
                 )
-            await update.message.reply_text("✅ Sent to channel as video (360p)")
+
+            await status_message.edit_text("✅ Sent to channel as video (360p)", parse_mode="Markdown")
 
     except Exception as e:
         log.error(f"[ERROR] Failed to process video: {e}")
         log.debug(traceback.format_exc())
-        await update.message.reply_text(f"⚠️ Error: {e}")
+        await status_message.edit_text(f"⚠️ Error: {e}", parse_mode="Markdown")
     finally:
         if os.path.exists(filename):
             os.remove(filename)
             log.info(f"[CLEANUP] Removed original: {filename}")
 
-
 # -------------------------------
 # Worker
 # -------------------------------
 
-async def worker_loop(app) -> None:
+async def worker_loop(app: object) -> None:
     while True:
-        update, context, url = await task_queue.get()
+        update, context, url, status_message = await task_queue.get()
         try:
-            await process_video(update, context, url)
+            await process_video(update, context, url, status_message)
         except Exception as e:
             log.error(f"[ERROR] Worker exception: {e}")
             log.debug(traceback.format_exc())
-            await update.message.reply_text(f"❌ Error: {e}")
+            await status_message.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
         finally:
             task_queue.task_done()
 
 
-async def start_worker(app) -> None:
+async def start_worker(app: object) -> None:
     asyncio.create_task(worker_loop(app))
 
 
