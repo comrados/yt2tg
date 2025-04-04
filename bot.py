@@ -44,7 +44,7 @@ task_queue: asyncio.Queue = asyncio.Queue()
 # Video splitting
 # -------------------------------
 
-def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_sec: int = 5) -> list[str]:
+def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_sec: int = 5) -> list[str]:
     temp_dir: str = tempfile.mkdtemp()
     output_paths: list[str] = []
 
