@@ -103,7 +103,6 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_s
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
-
 def clean_youtube_url(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
@@ -123,7 +122,6 @@ def clean_youtube_url(url: str) -> Optional[str]:
         return f"https://youtu.be/{video_id}"
     except Exception:
         return None
-
 
 # -------------------------------
 # Handlers
@@ -175,7 +173,6 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text if update.message else None
     log.info(f"[MSG] From user {user.id} in chat {chat.id}: {text}")
 
-
 # -------------------------------
 # Core video logic
 # -------------------------------
@@ -187,7 +184,6 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if os.path.exists(filename):
             os.remove(filename)
 
-        # Step 1: Get video metadata
         ydl_opts_info = {'quiet': True, 'skip_download': True}
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -206,16 +202,21 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # Step 3: Verify file exists
         if not os.path.exists(filename):
             await status_message.edit_text("❌ Download failed: file not found.", parse_mode="Markdown")
             return
 
-        # Step 4: Check file size
         size_bytes: int = os.path.getsize(filename)
         size_mb: float = round(size_bytes / (1024 * 1024), 1)
 
-        # Step 5: Split and send or send directly
+        # Determine target destination
+        target_chat_id: int = (
+            update.effective_chat.id
+            if update.effective_chat.type == "private"
+            else int(TARGET_CHANNEL)
+        )
+        log.info(f"[SEND] Sending to chat_id={target_chat_id}")
+
         if size_bytes > 50 * 1024 * 1024:
             await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
 
@@ -227,7 +228,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
                 caption_part = f"🎬 *{title}* ({idx}/{total})"
                 with open(part_path, 'rb') as part_file:
                     await context.bot.send_video(
-                        chat_id=TARGET_CHANNEL,
+                        chat_id=target_chat_id,
                         video=part_file,
                         caption=caption_part,
                         parse_mode='Markdown',
@@ -244,7 +245,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             caption: str = f"🎬 *{title}*"
             with open(filename, 'rb') as f:
                 await context.bot.send_video(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=target_chat_id,
                     video=f,
                     caption=caption,
                     parse_mode='Markdown',
@@ -259,7 +260,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
     except Exception as e:
         log.error(f"[ERROR] Failed to process video: {e}")
         log.debug(traceback.format_exc())
-        await status_message.edit_text(f"⚠️ Error: {e}", parse_mode="Markdown")
+        await status_message.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
     finally:
         if os.path.exists(filename):
             os.remove(filename)
@@ -281,10 +282,8 @@ async def worker_loop(app: object) -> None:
         finally:
             task_queue.task_done()
 
-
 async def start_worker(app: object) -> None:
     asyncio.create_task(worker_loop(app))
-
 
 # -------------------------------
 # Entry point
