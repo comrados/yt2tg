@@ -110,8 +110,15 @@ def clean_youtube_url(url: str) -> Optional[str]:
         if host not in {'youtube.com', 'www.youtube.com', 'youtu.be'}:
             return None
 
+        # Handle youtu.be links
         if 'youtu.be' in host:
             video_id = parsed.path.strip('/')
+
+        # Handle shorts links
+        elif '/shorts/' in parsed.path:
+            video_id = parsed.path.split('/shorts/')[-1].split('/')[0]
+
+        # Standard watch links
         else:
             query = parse_qs(parsed.query)
             video_id = query.get('v', [None])[0]
@@ -122,6 +129,7 @@ def clean_youtube_url(url: str) -> Optional[str]:
         return f"https://youtu.be/{video_id}"
     except Exception:
         return None
+
 
 # -------------------------------
 # Handlers
