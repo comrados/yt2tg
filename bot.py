@@ -67,20 +67,24 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_s
 
     start_time = 0
     part_index = 1
+    min_duration = 60  # seconds
+    step_sec = 60      # interval to increase or decrease
     base_chunk_duration = total_duration // math.ceil(os.path.getsize(input_path) / (max_size_mb * 1024 * 1024))
-    min_duration = 30  # don't go below this to avoid micro-chunks
 
     while start_time < total_duration:
-        current_duration = min(base_chunk_duration + overlap_sec, total_duration - start_time)
+        duration = min(base_chunk_duration + overlap_sec, total_duration - start_time)
+        max_duration = total_duration - start_time
         output_file = os.path.join(temp_dir, f"part_{part_index}.mp4")
 
-        while current_duration >= min_duration:
+        best_fit = None
+
+        while duration >= min_duration:
             # Try splitting this chunk
             cmd = [
                 'ffmpeg', '-y',
                 '-ss', str(start_time),
                 '-i', input_path,
-                '-t', str(current_duration),
+                '-t', str(duration),
                 '-c', 'copy',
                 output_file
             ]
@@ -91,24 +95,44 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_s
                 break
 
             size_mb = os.path.getsize(output_file) / (1024 * 1024)
-            if size_mb <= max_size_mb:
-                log.info(f"[SPLIT] Part {part_index}: {size_mb:.2f} MB, {current_duration}s")
-                output_paths.append(output_file)
-                break
-            else:
-                log.warning(f"[SPLIT] Part {part_index} too large ({size_mb:.2f} MB > {max_size_mb} MB), reducing duration")
-                os.remove(output_file)
-                current_duration -= 60  # reduce by 60s and try again
 
-        if current_duration < min_duration:
-            log.error(f"[SPLIT] Could not fit a chunk under {max_size_mb} MB even at min duration.")
+            if size_mb <= max_size_mb:
+                best_fit = (duration, output_file, size_mb)
+                os.remove(output_file)  # remove temporary file to retry with longer duration
+                duration += step_sec
+                if duration > max_duration:
+                    break  # can't go longer than total available
+            else:
+                os.remove(output_file)
+                duration -= step_sec
+                if best_fit:
+                    break  # last best_fit is our winner
+                elif duration < min_duration:
+                    log.error(f"[SPLIT] Could not fit a chunk under {max_size_mb} MB even at min duration.")
+                    return output_paths  # early exit to avoid infinite loop
+
+        if best_fit:
+            final_duration, final_path, final_size = best_fit
+            final_output_file = os.path.join(temp_dir, f"part_{part_index}.mp4")
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-ss', str(start_time),
+                '-i', input_path,
+                '-t', str(final_duration),
+                '-c', 'copy',
+                final_output_file
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            log.info(f"[SPLIT] Finalized part {part_index}: {final_size:.2f} MB, {final_duration}s")
+            output_paths.append(final_output_file)
+            start_time += final_duration - overlap_sec
+            part_index += 1
+        else:
+            log.error(f"[SPLIT] No suitable duration found for part {part_index}. Aborting.")
             break
 
-        # Update next chunk start time (preserving overlap)
-        start_time += current_duration - overlap_sec
-        part_index += 1
-
     return output_paths
+
 
 
 
