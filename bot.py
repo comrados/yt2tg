@@ -44,7 +44,7 @@ task_queue: asyncio.Queue = asyncio.Queue()
 # Video splitting
 # -------------------------------
 
-def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_sec: int = 5) -> list[str]:
+def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_sec: int = 5) -> list[str]:
     temp_dir: str = tempfile.mkdtemp()
     output_paths: list[str] = []
 
@@ -81,6 +81,7 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_s
 
         output_file: str = os.path.join(temp_dir, f"part_{i + 1}.mp4")
 
+        # Initial split with copy
         cmd = [
             'ffmpeg', '-y',
             '-ss', str(start_time),
@@ -90,9 +91,49 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_s
             output_file
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        size_mb = os.path.getsize(output_file) / (1024 * 1024)
+        log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {size_mb:.2f} MB")
+
+        # If part exceeds max size, re-encode using two-pass
+        if size_mb > max_size_mb:
+            log.warning(f"[SPLIT] Part {i + 1} too large ({size_mb:.2f} MB). Re-encoding to fit under {max_size_mb} MB.")
+
+            # Estimate target bitrate
+            video_bitrate_kbps = int(((max_size_mb * 8192) / duration) - 128)
+            video_bitrate_kbps = max(video_bitrate_kbps, 300)  # Avoid too-low bitrate
+
+            reencoded_file = os.path.join(temp_dir, f"reencoded_part_{i + 1}.mp4")
+
+            # First pass
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-ss', str(start_time), '-i', input_path,
+                '-t', str(duration),
+                '-c:v', 'libx264', '-b:v', f'{video_bitrate_kbps}k',
+                '-pass', '1', '-an', '-f', 'mp4', os.devnull
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Second pass
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-ss', str(start_time), '-i', input_path,
+                '-t', str(duration),
+                '-c:v', 'libx264', '-b:v', f'{video_bitrate_kbps}k',
+                '-pass', '2', '-c:a', 'aac', '-b:a', '128k',
+                reencoded_file
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            os.remove(output_file)
+            output_file = reencoded_file
+            log.info(f"[REENCODE] Re-encoded part {i + 1} to {video_bitrate_kbps} kbps")
+
+            # Cleanup 2-pass logs
+            for pass_log in ['ffmpeg2pass-0.log', 'ffmpeg2pass-0.log.mbtree']:
+                if os.path.exists(pass_log):
+                    os.remove(pass_log)
+
         output_paths.append(output_file)
-        log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {output_file} "
-                 f"(start: {start_time:.2f}s, duration: {duration:.2f}s)")
 
     return output_paths
 
@@ -225,7 +266,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if size_bytes > 50 * 1024 * 1024:
             await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
 
-            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=45, overlap_sec=5)
+            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=49, overlap_sec=5)
             total: int = len(parts)
 
             for idx, part_path in enumerate(parts, start=1):
