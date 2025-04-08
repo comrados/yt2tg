@@ -44,9 +44,9 @@ task_queue: asyncio.Queue = asyncio.Queue()
 # Video splitting
 # -------------------------------
 
-def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_sec: int = 5) -> list[str]:
-    temp_dir: str = tempfile.mkdtemp()
-    output_paths: list[str] = []
+def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_sec: int = 5) -> list[str]:
+    temp_dir = tempfile.mkdtemp()
+    output_paths = []
 
     log.info(f"[SPLIT] Analyzing video: {input_path}")
 
@@ -62,80 +62,55 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 49, overlap_s
         raise Exception("Could not determine video duration")
 
     h, m, s = map(float, match.groups())
-    total_duration: int = int(h * 3600 + m * 60 + s)
+    total_duration = int(h * 3600 + m * 60 + s)
     log.info(f"[SPLIT] Video duration: {total_duration} seconds")
 
-    # Get total file size
-    file_size: int = os.path.getsize(input_path)
-    file_size_mb: float = file_size / (1024 * 1024)
-    log.info(f"[SPLIT] File size: {file_size_mb:.2f} MB")
+    start_time = 0
+    part_index = 1
+    base_chunk_duration = total_duration // math.ceil(os.path.getsize(input_path) / (max_size_mb * 1024 * 1024))
+    min_duration = 30  # don't go below this to avoid micro-chunks
 
-    # Determine number of equal parts
-    chunks_count: int = math.ceil(file_size_mb / max_size_mb)
-    base_chunk_duration: float = total_duration / chunks_count
-    log.info(f"[SPLIT] Targeting {chunks_count} equal parts of ~{base_chunk_duration:.2f} seconds each (+{overlap_sec}s overlap)")
+    while start_time < total_duration:
+        current_duration = min(base_chunk_duration + overlap_sec, total_duration - start_time)
+        output_file = os.path.join(temp_dir, f"part_{part_index}.mp4")
 
-    for i in range(chunks_count):
-        start_time: float = max(i * base_chunk_duration - overlap_sec * i, 0)
-        duration: float = base_chunk_duration + (overlap_sec if i < chunks_count - 1 else 0)
-
-        output_file: str = os.path.join(temp_dir, f"part_{i + 1}.mp4")
-
-        # Initial split with copy
-        cmd = [
-            'ffmpeg', '-y',
-            '-ss', str(start_time),
-            '-i', input_path,
-            '-t', str(duration),
-            '-c', 'copy',
-            output_file
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        size_mb = os.path.getsize(output_file) / (1024 * 1024)
-        log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {size_mb:.2f} MB")
-
-        # If part exceeds max size, re-encode using two-pass
-        if size_mb > max_size_mb:
-            log.warning(f"[SPLIT] Part {i + 1} too large ({size_mb:.2f} MB). Re-encoding to fit under {max_size_mb} MB.")
-
-            # Estimate target bitrate
-            video_bitrate_kbps = int(((max_size_mb * 8192) / duration) - 128)
-            video_bitrate_kbps = max(video_bitrate_kbps, 300)  # Avoid too-low bitrate
-
-            reencoded_file = os.path.join(temp_dir, f"reencoded_part_{i + 1}.mp4")
-
-            # First pass
-            subprocess.run([
+        while current_duration >= min_duration:
+            # Try splitting this chunk
+            cmd = [
                 'ffmpeg', '-y',
-                '-ss', str(start_time), '-i', input_path,
-                '-t', str(duration),
-                '-c:v', 'libx264', '-b:v', f'{video_bitrate_kbps}k',
-                '-pass', '1', '-an', '-f', 'mp4', os.devnull
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                '-ss', str(start_time),
+                '-i', input_path,
+                '-t', str(current_duration),
+                '-c', 'copy',
+                output_file
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # Second pass
-            subprocess.run([
-                'ffmpeg', '-y',
-                '-ss', str(start_time), '-i', input_path,
-                '-t', str(duration),
-                '-c:v', 'libx264', '-b:v', f'{video_bitrate_kbps}k',
-                '-pass', '2', '-c:a', 'aac', '-b:a', '128k',
-                reencoded_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not os.path.exists(output_file):
+                log.warning(f"[SPLIT] Failed to create part {part_index}")
+                break
 
-            os.remove(output_file)
-            output_file = reencoded_file
-            log.info(f"[REENCODE] Re-encoded part {i + 1} to {video_bitrate_kbps} kbps")
+            size_mb = os.path.getsize(output_file) / (1024 * 1024)
+            if size_mb <= max_size_mb:
+                log.info(f"[SPLIT] Part {part_index}: {size_mb:.2f} MB, {current_duration}s")
+                output_paths.append(output_file)
+                break
+            else:
+                log.warning(f"[SPLIT] Part {part_index} too large ({size_mb:.2f} MB > {max_size_mb} MB), reducing duration")
+                os.remove(output_file)
+                current_duration -= 60  # reduce by 60s and try again
 
-            # Cleanup 2-pass logs
-            for pass_log in ['ffmpeg2pass-0.log', 'ffmpeg2pass-0.log.mbtree']:
-                if os.path.exists(pass_log):
-                    os.remove(pass_log)
+        if current_duration < min_duration:
+            log.error(f"[SPLIT] Could not fit a chunk under {max_size_mb} MB even at min duration.")
+            break
 
-        output_paths.append(output_file)
+        # Update next chunk start time (preserving overlap)
+        start_time += current_duration - overlap_sec
+        part_index += 1
 
     return output_paths
+
+
 
 # -------------------------------
 # Utils
