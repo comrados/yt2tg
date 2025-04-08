@@ -44,9 +44,9 @@ task_queue: asyncio.Queue = asyncio.Queue()
 # Video splitting
 # -------------------------------
 
-def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_sec: int = 5) -> list[str]:
-    temp_dir = tempfile.mkdtemp()
-    output_paths = []
+def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 40, overlap_sec: int = 5) -> list[str]:
+    temp_dir: str = tempfile.mkdtemp()
+    output_paths: list[str] = []
 
     log.info(f"[SPLIT] Analyzing video: {input_path}")
 
@@ -57,83 +57,65 @@ def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 45, overlap_s
         stdout=subprocess.DEVNULL,
         text=True
     )
-    match = re.search(r'Duration: (\d+):(\d+):(\d+.\d+)', result.stderr)
+    match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', result.stderr)
     if not match:
         raise Exception("Could not determine video duration")
 
     h, m, s = map(float, match.groups())
-    total_duration = int(h * 3600 + m * 60 + s)
+    total_duration: int = int(h * 3600 + m * 60 + s)
     log.info(f"[SPLIT] Video duration: {total_duration} seconds")
 
-    start_time = 0
-    part_index = 1
-    min_duration = 60  # seconds
-    step_sec = 60      # interval to increase or decrease
-    base_chunk_duration = total_duration // math.ceil(os.path.getsize(input_path) / (max_size_mb * 1024 * 1024))
+    # Get total file size
+    file_size: int = os.path.getsize(input_path)
+    file_size_mb: float = file_size / (1024 * 1024)
+    log.info(f"[SPLIT] File size: {file_size_mb:.2f} MB")
 
-    while start_time < total_duration:
-        duration = min(base_chunk_duration + overlap_sec, total_duration - start_time)
-        max_duration = total_duration - start_time
-        output_file = os.path.join(temp_dir, f"part_{part_index}.mp4")
+    # Determine number of equal parts
+    chunks_count: int = math.ceil(file_size_mb / max_size_mb)
+    base_chunk_duration: float = total_duration / chunks_count
+    log.info(f"[SPLIT] Targeting {chunks_count} equal parts of ~{base_chunk_duration:.2f} seconds each (+{overlap_sec}s overlap)")
 
-        best_fit = None
+    for i in range(chunks_count):
+        start_time: float = max(i * base_chunk_duration - overlap_sec * i, 0)
+        duration: float = base_chunk_duration + (overlap_sec if i < chunks_count - 1 else 0)
 
-        while duration >= min_duration:
-            # Try splitting this chunk
-            cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(start_time),
-                '-i', input_path,
-                '-t', str(duration),
-                '-c', 'copy',
-                output_file
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        output_file: str = os.path.join(temp_dir, f"part_{i + 1}.mp4")
 
-            if not os.path.exists(output_file):
-                log.warning(f"[SPLIT] Failed to create part {part_index}")
-                break
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start_time),
+            '-i', input_path,
+            '-t', str(duration),
+            '-c', 'copy',
+            output_file
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            size_mb = os.path.getsize(output_file) / (1024 * 1024)
+        size_mb = os.path.getsize(output_file) / (1024 * 1024)
+        if size_mb > 50:
+            log.warning(f"[SPLIT] Part {i + 1} exceeds 50MB ({size_mb:.2f} MB), splitting in half")
+            os.remove(output_file)
+            half_duration = duration / 2
 
-            if size_mb <= max_size_mb:
-                best_fit = (duration, output_file, size_mb)
-                os.remove(output_file)  # remove temporary file to retry with longer duration
-                duration += step_sec
-                if duration > max_duration:
-                    break  # can't go longer than total available
-            else:
-                os.remove(output_file)
-                duration -= step_sec
-                if best_fit:
-                    break  # last best_fit is our winner
-                elif duration < min_duration:
-                    log.error(f"[SPLIT] Could not fit a chunk under {max_size_mb} MB even at min duration.")
-                    return output_paths  # early exit to avoid infinite loop
-
-        if best_fit:
-            final_duration, final_path, final_size = best_fit
-            final_output_file = os.path.join(temp_dir, f"part_{part_index}.mp4")
-            subprocess.run([
-                'ffmpeg', '-y',
-                '-ss', str(start_time),
-                '-i', input_path,
-                '-t', str(final_duration),
-                '-c', 'copy',
-                final_output_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            log.info(f"[SPLIT] Finalized part {part_index}: {final_size:.2f} MB, {final_duration}s")
-            output_paths.append(final_output_file)
-            start_time += final_duration - overlap_sec
-            part_index += 1
+            for j in range(2):
+                half_start = start_time + j * half_duration
+                half_file = os.path.join(temp_dir, f"part_{i + 1}_{j + 1}.mp4")
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-ss', str(half_start),
+                    '-i', input_path,
+                    '-t', str(half_duration),
+                    '-c', 'copy',
+                    half_file
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                output_paths.append(half_file)
+                log.info(f"[SPLIT] Created sub-part: {half_file} (start: {half_start:.2f}s, duration: {half_duration:.2f}s)")
         else:
-            log.error(f"[SPLIT] No suitable duration found for part {part_index}. Aborting.")
-            break
+            output_paths.append(output_file)
+            log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {output_file} (start: {start_time:.2f}s, duration: {duration:.2f}s, size: {size_mb:.2f} MB)")
 
     return output_paths
-
-
 
 
 # -------------------------------
@@ -265,7 +247,8 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if size_bytes > 50 * 1024 * 1024:
             await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
 
-            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=49, overlap_sec=5)
+            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=40, overlap_sec=5)
+
             total: int = len(parts)
 
             for idx, part_path in enumerate(parts, start=1):
