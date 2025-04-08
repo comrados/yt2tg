@@ -217,15 +217,16 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 
         title: str = info.get("title", "Untitled")
 
-        # Download the video in 360p
-        await status_message.edit_text("⏬ Downloading video (360p)...", parse_mode="Markdown")
+        # Download the video in 360p or best available fallback
+        await status_message.edit_text("⏬ Downloading video (360p or best available)...", parse_mode="Markdown")
         ydl_opts = {
-            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]',
+            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': filename,
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True
         }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
