@@ -112,6 +112,8 @@ def clean_youtube_url(url: str) -> Optional[str]:
 
         if 'youtu.be' in host:
             video_id = parsed.path.strip('/')
+        elif '/shorts/' in parsed.path:
+            video_id = parsed.path.split('/shorts/')[-1].split('/')[0]
         else:
             query = parse_qs(parsed.query)
             video_id = query.get('v', [None])[0]
@@ -153,11 +155,15 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     log.info(f"[QUEUE] New task from user {update.effective_user.id} — URL: {clean_url}")
-
-    # 🔄 Single status message
-    status_message = await update.message.reply_text("✅ Added to the queue...", parse_mode="Markdown")
-
-    # Pass status_message into the queue
+    if update.message:
+        status_message = await update.message.reply_text("✅ Added to the queue...", parse_mode="Markdown")
+    else:
+        log.warning("[WARN] No message object in update — fallback to sending manually")
+        status_message = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ Added to the queue...",
+            parse_mode="Markdown"
+        )
     await task_queue.put((update, context, clean_url, status_message))
 
 async def debug_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -165,7 +171,6 @@ async def debug_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         chat_id: int = update.message.forward_from_chat.id
         log.info(f"[FORWARD] Forwarded from chat ID: {chat_id}")
         await update.message.reply_text(f"📣 Channel ID: `{chat_id}`", parse_mode='Markdown')
-
 
 async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -190,7 +195,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 
         title: str = info.get("title", "Untitled")
 
-        # Step 2: Download the video in 360p
+        # Download the video in 360p
         await status_message.edit_text("⏬ Downloading video (360p)...", parse_mode="Markdown")
         ydl_opts = {
             'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]',
@@ -220,7 +225,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if size_bytes > 50 * 1024 * 1024:
             await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
 
-            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=49, overlap_sec=5)
+            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=45, overlap_sec=5)
             total: int = len(parts)
 
             for idx, part_path in enumerate(parts, start=1):
