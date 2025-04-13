@@ -12,6 +12,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from telegram import Update, Message
+from telegram.error import RetryAfter
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, Application, filters
@@ -74,7 +75,6 @@ def parse_log_time(line: str) -> datetime:
     except Exception:
         return datetime.min
 
-
 class DownloadTask:
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message):
         self.update = update
@@ -89,15 +89,15 @@ class DownloadTask:
 
     async def run(self):
         try:
-            log.info(f"[TASK] Started for {self.user_id} | URL: {self.url}")
+            log.info(f"[TASK] Started for user {self.user_id} in chat {self.update.effective_chat.id} | URL: {self.url}")
             await asyncio.wait_for(self._process(), timeout=600)
         except asyncio.TimeoutError:
             log.warning(f"[TASK] Timeout for user {self.user_id}")
-            await self.status_msg.edit_text("❌ Task timed out after 10 minutes.", parse_mode="Markdown")
+            await self._safe_edit_status("❌ Task timed out after 10 minutes.")
         except Exception as e:
             log.error(f"[TASK] Error: {e}")
             log.debug(traceback.format_exc())
-            await self.status_msg.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
+            await self._safe_edit_status(f"❌ Error: {e}")
         finally:
             await self.cleanup()
             running_tasks.discard(self)
@@ -109,7 +109,7 @@ class DownloadTask:
         info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
         title = info.get("title", "Untitled")
 
-        await self.status_msg.edit_text("⏬ Downloading video (360p)...", parse_mode="Markdown")
+        await self._safe_edit_status("⏬ Downloading video (360p)...")
         ydl_opts = {
             'format': 'best[height<=360][ext=mp4][tbr<=600]/best[ext=mp4]/best',
             'outtmpl': self.filename,
@@ -132,30 +132,47 @@ class DownloadTask:
         target_chat_id = self.update.effective_chat.id if self.update.effective_chat.type == "private" else int(TARGET_CHANNEL)
 
         if size_mb > 50:
-            await self.status_msg.edit_text(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...", parse_mode="Markdown")
+            await self._safe_edit_status(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...")
             paths, temp_dir = self.split_video(self.filename)
             self.temp_dirs.append(temp_dir)
             self.temp_files.extend(paths)
             for idx, part in enumerate(paths, 1):
-                await self.status_msg.edit_text(f"📤 Sending part {idx}/{len(paths)}...", parse_mode="Markdown")
-                with open(part, 'rb') as f:
+                await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
+                await self._send_video_with_retry(target_chat_id, part, f"🎬 *{title}* ({idx}/{len(paths)})")
+        else:
+            await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{title}*")
+            await self._safe_edit_status("✅ Sent to Telegram")
+
+    async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
+        max_retries = 10
+        with open(file_path, 'rb') as f:
+            for attempt in range(1, max_retries + 1):
+                try:
                     await self.context.bot.send_video(
-                        chat_id=target_chat_id,
+                        chat_id=chat_id,
                         video=f,
-                        caption=f"🎬 *{title}* ({idx}/{len(paths)})",
+                        caption=caption,
                         parse_mode='Markdown',
                         supports_streaming=True
                     )
-        else:
-            with open(self.filename, 'rb') as f:
-                await self.context.bot.send_video(
-                    chat_id=target_chat_id,
-                    video=f,
-                    caption=f"🎬 *{title}*",
-                    parse_mode='Markdown',
-                    supports_streaming=True
-                )
-            await self.status_msg.edit_text("✅ Sent to Telegram", parse_mode="Markdown")
+                    log.info(f"[SEND] Video sent successfully to chat {chat_id}")
+                    break
+                except RetryAfter as e:
+                    wait_time = int(e.retry_after) + 1
+                    log.warning(f"[RETRY] Flood control. Waiting {wait_time}s (attempt {attempt}/{max_retries})...")
+                    await asyncio.sleep(wait_time)
+                    f.seek(0)  # Reset file pointer after a failed send
+                except Exception as e:
+                    log.error(f"[ERROR] Failed to send video: {e}")
+                    break
+            else:
+                log.error(f"[FAIL] Could not send video to chat {chat_id} after {max_retries} retries")
+
+    async def _safe_edit_status(self, text: str):
+        try:
+            await self.status_msg.edit_text(text, parse_mode="Markdown")
+        except Exception as e:
+            log.warning(f"[EDIT_FAIL] Could not edit message: {e}")
 
     def split_video(self, input_path: str, max_size_mb: int = 40, overlap_sec: int = 5) -> tuple[list[str], str]:
         temp_dir = tempfile.mkdtemp()
@@ -198,11 +215,11 @@ class DownloadTask:
 
 # --- Telegram Handlers ---
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.info(f"[COMMAND] /id from {update.effective_user.id}")
+    log.info(f"[COMMAND] /id from user {update.effective_user.id} in chat {update.effective_chat.id}")
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
 
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.info(f"[COMMAND] /download from {update.effective_user.id}")
+    log.info(f"[COMMAND] /download from user {update.effective_user.id} in chat {update.effective_chat.id}")
     if not is_allowed(update):
         log.warning(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
         await update.message.reply_text("🚫 Not authorized.")
@@ -225,7 +242,7 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
 
-    log.info(f"[COMMAND] /logs from {update.effective_user.id}")
+    log.info(f"[COMMAND] /logs from user {update.effective_user.id} in chat {update.effective_chat.id}")
     one_hour_ago = datetime.now() - timedelta(minutes=60)
     with open(LOG_FILE) as f:
         lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
@@ -252,7 +269,7 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
 
-    log.info(f"[COMMAND] /tasks from {update.effective_user.id}")
+    log.info(f"[COMMAND] /tasks from user {update.effective_user.id} in chat {update.effective_chat.id}")
     if not running_tasks:
         await update.message.reply_text("✅ No tasks running.")
         return
@@ -263,7 +280,8 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text if update.message else ""
-    log.info(f"[MSG] From {user.id}: {text}")
+    chat = update.effective_chat.id
+    log.info(f"[MSG] From user {user.id} in chat {chat}: {text}")
 
 # --- Queues & Worker ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
