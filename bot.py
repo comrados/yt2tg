@@ -7,29 +7,32 @@ import logging
 import tempfile
 import traceback
 import subprocess
-
-from typing import Optional
-
+from datetime import datetime, timedelta
+from typing import Optional, Union
 from urllib.parse import urlparse, parse_qs
 
-from telegram import Update, Message
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram import Update, Message, InputFile
+from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
+                          ContextTypes, filters, Application)
 import yt_dlp
 
-# Logging setup
+# --- Logging Configuration ---
+LOG_FILE = "bot.log"
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
 )
-log = logging.getLogger(__name__)
 
-# Load config
+log = logging.getLogger("ytbot")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.bot").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext._application").setLevel(logging.WARNING)
+
+# --- Config Loading ---
 with open("config.json") as f:
     config = json.load(f)
 
@@ -37,91 +40,7 @@ BOT_TOKEN: str = config["bot_token"]
 ALLOWED_USERS: set[int] = set(config["allowed_users"])
 TARGET_CHANNEL: str = config["target_channel"]
 
-task_queue: asyncio.Queue = asyncio.Queue()
-
-
-# -------------------------------
-# Video splitting
-# -------------------------------
-
-def split_video_ffmpeg_by_size(input_path: str, max_size_mb: int = 40, overlap_sec: int = 5) -> list[str]:
-    temp_dir: str = tempfile.mkdtemp()
-    output_paths: list[str] = []
-
-    log.info(f"[SPLIT] Analyzing video: {input_path}")
-
-    # Get total video duration
-    result = subprocess.run(
-        ['ffmpeg', '-i', input_path],
-        stderr=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        text=True
-    )
-    match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', result.stderr)
-    if not match:
-        raise Exception("Could not determine video duration")
-
-    h, m, s = map(float, match.groups())
-    total_duration: int = int(h * 3600 + m * 60 + s)
-    log.info(f"[SPLIT] Video duration: {total_duration} seconds")
-
-    # Get total file size
-    file_size: int = os.path.getsize(input_path)
-    file_size_mb: float = file_size / (1024 * 1024)
-    log.info(f"[SPLIT] File size: {file_size_mb:.2f} MB")
-
-    # Determine number of equal parts
-    chunks_count: int = math.ceil(file_size_mb / max_size_mb)
-    base_chunk_duration: float = total_duration / chunks_count
-    log.info(f"[SPLIT] Targeting {chunks_count} equal parts of ~{base_chunk_duration:.2f} seconds each (+{overlap_sec}s overlap)")
-
-    for i in range(chunks_count):
-        start_time: float = max(i * base_chunk_duration - overlap_sec * i, 0)
-        duration: float = base_chunk_duration + (overlap_sec if i < chunks_count - 1 else 0)
-
-        output_file: str = os.path.join(temp_dir, f"part_{i + 1}.mp4")
-
-        cmd = [
-            'ffmpeg', '-y',
-            '-ss', str(start_time),
-            '-i', input_path,
-            '-t', str(duration),
-            '-c', 'copy',
-            output_file
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        size_mb = os.path.getsize(output_file) / (1024 * 1024)
-        if size_mb > 50:
-            log.warning(f"[SPLIT] Part {i + 1} exceeds 50MB ({size_mb:.2f} MB), splitting in half")
-            os.remove(output_file)
-            half_duration = duration / 2
-
-            for j in range(2):
-                half_start = start_time + j * half_duration
-                half_file = os.path.join(temp_dir, f"part_{i + 1}_{j + 1}.mp4")
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-ss', str(half_start),
-                    '-i', input_path,
-                    '-t', str(half_duration),
-                    '-c', 'copy',
-                    half_file
-                ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                output_paths.append(half_file)
-                log.info(f"[SPLIT] Created sub-part: {half_file} (start: {half_start:.2f}s, duration: {half_duration:.2f}s)")
-        else:
-            output_paths.append(output_file)
-            log.info(f"[SPLIT] Created part {i + 1}/{chunks_count}: {output_file} (start: {start_time:.2f}s, duration: {duration:.2f}s, size: {size_mb:.2f} MB)")
-
-    return output_paths
-
-
-# -------------------------------
-# Utils
-# -------------------------------
-
+# --- Utility Functions ---
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
@@ -147,189 +66,186 @@ def clean_youtube_url(url: str) -> Optional[str]:
     except Exception:
         return None
 
-# -------------------------------
-# Handlers
-# -------------------------------
 
-async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    log.info(f"[ID] /id from user {user_id} in chat {chat_id}")
-    await update.message.reply_text(
-        f"👤 Your Telegram user ID: `{user_id}`\n💬 Chat ID: `{chat_id}`",
-        parse_mode='Markdown'
-    )
+class DownloadTask:
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message):
+        self.update = update
+        self.context = context
+        self.url = url
+        self.status_msg = status_msg
+        self.filename = "video.mp4"
+        self.temp_files: list[str] = []
+        self.temp_dirs: list[str] = []
+        self.created_at = datetime.now()
+        self.user_id = update.effective_user.id
 
-async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update):
-        log.info(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
-        await update.message.reply_text("🚫 You're not allowed to use this bot.")
-        return
+    async def run(self):
+        try:
+            await asyncio.wait_for(self._process(), timeout=600)  # 10 min timeout
+        except asyncio.TimeoutError:
+            log.warning("[TASK] Task timed out")
+            await self.status_msg.edit_text("❌ Task timed out after 10 minutes.", parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"[TASK] Error: {e}")
+            log.debug(traceback.format_exc())
+            await self.status_msg.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
+        finally:
+            await self.cleanup()
+            running_tasks.discard(self)
 
-    if not context.args:
-        await update.message.reply_text("📎 Please send a YouTube link.")
-        return
+    async def _process(self):
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
 
-    raw_url: str = context.args[0]
-    clean_url: Optional[str] = clean_youtube_url(raw_url)
-    if not clean_url:
-        await update.message.reply_text("❌ Invalid YouTube link.")
-        return
+        info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
+        title = info.get("title", "Untitled")
 
-    log.info(f"[QUEUE] New task from user {update.effective_user.id} — URL: {clean_url}")
-    if update.message:
-        status_message = await update.message.reply_text("✅ Added to the queue...", parse_mode="Markdown")
-    else:
-        log.warning("[WARN] No message object in update — fallback to sending manually")
-        status_message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="✅ Added to the queue...",
-            parse_mode="Markdown"
-        )
-    await task_queue.put((update, context, clean_url, status_message))
-
-async def debug_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message.forward_from_chat:
-        chat_id: int = update.message.forward_from_chat.id
-        log.info(f"[FORWARD] Forwarded from chat ID: {chat_id}")
-        await update.message.reply_text(f"📣 Channel ID: `{chat_id}`", parse_mode='Markdown')
-
-async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-    text = update.message.text if update.message else None
-    log.info(f"[MSG] From user {user.id} in chat {chat.id}: {text}")
-
-# -------------------------------
-# Core video logic
-# -------------------------------
-
-async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_message: Message) -> None:
-    filename: str = "video.mp4"
-
-    try:
-        if os.path.exists(filename):
-            os.remove(filename)
-
-        ydl_opts_info = {'quiet': True, 'skip_download': True}
-        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        title: str = info.get("title", "Untitled")
-
-        # Download the video in 360p or best available fallback
-        await status_message.edit_text("⏬ Downloading video (360p or best available)...", parse_mode="Markdown")
+        await self.status_msg.edit_text("⏬ Downloading video (360p)...", parse_mode="Markdown")
         ydl_opts = {
-            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[height<=360][ext=mp4]/best[ext=mp4]/best',
-            'outtmpl': filename,
+            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[ext=mp4]/best',
+            'outtmpl': self.filename,
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            ydl.download([self.url])
 
-        if not os.path.exists(filename):
-            await status_message.edit_text("❌ Download failed: file not found.", parse_mode="Markdown")
-            return
+        if not os.path.exists(self.filename):
+            raise FileNotFoundError("Downloaded file not found")
 
-        size_bytes: int = os.path.getsize(filename)
-        size_mb: float = round(size_bytes / (1024 * 1024), 1)
+        size_mb = os.path.getsize(self.filename) / (1024 * 1024)
+        target_chat_id = self.update.effective_chat.id if self.update.effective_chat.type == "private" else int(TARGET_CHANNEL)
 
-        # Determine target destination
-        target_chat_id: int = (
-            update.effective_chat.id
-            if update.effective_chat.type == "private"
-            else int(TARGET_CHANNEL)
-        )
-        log.info(f"[SEND] Sending to chat_id={target_chat_id}")
-
-        if size_bytes > 50 * 1024 * 1024:
-            await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Splitting...", parse_mode="Markdown")
-
-            parts: list[str] = split_video_ffmpeg_by_size(filename, max_size_mb=40, overlap_sec=5)
-
-            total: int = len(parts)
-
-            for idx, part_path in enumerate(parts, start=1):
-                await status_message.edit_text(f"📤 Sending part {idx}/{total}...", parse_mode="Markdown")
-                caption_part = f"🎬 *{title}* ({idx}/{total})"
-                with open(part_path, 'rb') as part_file:
-                    await context.bot.send_video(
-                        chat_id=target_chat_id,
-                        video=part_file,
-                        caption=caption_part,
-                        parse_mode='Markdown',
-                        supports_streaming=True
-                    )
-                os.remove(part_path)
-                log.info(f"[SEND] Sent part {idx}/{total}")
-                log.info(f"[CLEANUP] Removed part: {idx}/{total}")
-
-            await status_message.edit_text("✅ All parts sent.", parse_mode="Markdown")
+        if size_mb > 50:
+            await self.status_msg.edit_text(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...", parse_mode="Markdown")
+            paths, temp_dir = self.split_video(self.filename)
+            self.temp_dirs.append(temp_dir)
+            self.temp_files.extend(paths)
+            for idx, part in enumerate(paths, 1):
+                await self.status_msg.edit_text(f"📤 Sending part {idx}/{len(paths)}...", parse_mode="Markdown")
+                await self.context.bot.send_video(target_chat_id, video=InputFile(part), caption=f"🎬 *{title}* ({idx}/{len(paths)})", parse_mode='Markdown')
         else:
-            await status_message.edit_text(f"📦 Downloaded ({size_mb} MB). Sending...", parse_mode="Markdown")
+            await self.context.bot.send_video(target_chat_id, video=InputFile(self.filename), caption=f"🎬 *{title}*", parse_mode='Markdown')
+            await self.status_msg.edit_text("✅ Sent to Telegram", parse_mode="Markdown")
 
-            caption: str = f"🎬 *{title}*"
-            with open(filename, 'rb') as f:
-                await context.bot.send_video(
-                    chat_id=target_chat_id,
-                    video=f,
-                    caption=caption,
-                    parse_mode='Markdown',
-                    supports_streaming=True,
-                    write_timeout=60,
-                    read_timeout=60,
-                    connect_timeout=30
-                )
+    def split_video(self, input_path: str, max_size_mb: int = 40, overlap_sec: int = 5) -> tuple[list[str], str]:
+        temp_dir = tempfile.mkdtemp()
+        paths = []
 
-            await status_message.edit_text("✅ Sent to channel as video (360p)", parse_mode="Markdown")
+        result = subprocess.run(['ffmpeg', '-i', input_path], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+        match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', result.stderr)
+        h, m, s = map(float, match.groups())
+        total_duration = int(h * 3600 + m * 60 + s)
 
-    except Exception as e:
-        log.error(f"[ERROR] Failed to process video: {e}")
-        log.debug(traceback.format_exc())
-        await status_message.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
-            log.info(f"[CLEANUP] Removed original: {filename}")
+        file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
+        chunks_count = math.ceil(file_size_mb / max_size_mb)
+        base_duration = total_duration / chunks_count
 
-# -------------------------------
-# Worker
-# -------------------------------
+        for i in range(chunks_count):
+            start = max(i * base_duration - overlap_sec * i, 0)
+            duration = base_duration + (overlap_sec if i < chunks_count - 1 else 0)
+            out_file = os.path.join(temp_dir, f"part_{i+1}.mp4")
 
-async def worker_loop(app: object) -> None:
+            cmd = ['ffmpeg', '-y', '-ss', str(start), '-i', input_path, '-t', str(duration), '-c', 'copy', out_file]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            paths.append(out_file)
+
+        return paths, temp_dir
+
+    async def cleanup(self):
+        for file in self.temp_files + [self.filename]:
+            if os.path.exists(file):
+                try:
+                    os.remove(file)
+                    log.info(f"[CLEANUP] Removed file: {file}")
+                except Exception as e:
+                    log.warning(f"[CLEANUP] Could not remove {file}: {e}")
+        for d in self.temp_dirs:
+            if os.path.exists(d):
+                try:
+                    os.rmdir(d)
+                    log.info(f"[CLEANUP] Removed directory: {d}")
+                except Exception as e:
+                    log.warning(f"[CLEANUP] Could not remove {d}: {e}")
+
+# --- Telegram Command Handlers ---
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("🚫 Not authorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("📎 Please provide a YouTube link.")
+        return
+
+    url = clean_youtube_url(context.args[0])
+    if not url:
+        await update.message.reply_text("❌ Invalid YouTube URL.")
+        return
+
+    status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
+    task = DownloadTask(update, context, url, status_msg)
+    running_tasks.add(task)
+    task_queue.put_nowait(task)
+
+async def send_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("🚫 Not authorized.")
+        return
+    one_hour_ago = datetime.now() - timedelta(minutes=60)
+    with open(LOG_FILE) as f:
+        recent_lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
+    log_data = ''.join(recent_lines) or "No logs in the last 60 minutes."
+    await update.message.reply_document(document=InputFile.from_buffer(log_data.encode(), filename="log.txt"))
+
+def parse_log_time(line: str) -> datetime:
+    try:
+        timestamp = line.split()[0] + " " + line.split()[1]
+        return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S,%f")
+    except Exception:
+        return datetime.min
+
+async def list_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("🚫 Not authorized.")
+        return
+    if not running_tasks:
+        await update.message.reply_text("✅ No tasks running.")
+        return
+
+    lines = [f"👤 User: {t.user_id}, ⏱️ Started: {t.created_at.strftime('%H:%M:%S')}, 🔗 URL: {t.url}" for t in running_tasks]
+    await update.message.reply_text("\n".join(lines))
+
+# --- Task Worker Loop ---
+task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
+running_tasks: set[DownloadTask] = set()
+
+async def worker_loop():
     while True:
-        update, context, url, status_message = await task_queue.get()
-        try:
-            await process_video(update, context, url, status_message)
-        except Exception as e:
-            log.error(f"[ERROR] Worker exception: {e}")
-            log.debug(traceback.format_exc())
-            await status_message.edit_text(f"❌ Error: {e}", parse_mode="Markdown")
-        finally:
-            task_queue.task_done()
+        task = await task_queue.get()
+        await task.run()
+        task_queue.task_done()
 
-async def start_worker(app: object) -> None:
-    asyncio.create_task(worker_loop(app))
-
-# -------------------------------
-# Entry point
-# -------------------------------
-
-if __name__ == "__main__":
-    app = (
+# --- Bot Setup ---
+async def main():
+    app: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .post_init(start_worker)
         .build()
     )
 
     app.add_handler(CommandHandler("id", id_command))
-    app.add_handler(CommandHandler("download", download_command, block=False))
-    app.add_handler(MessageHandler(filters.FORWARDED, debug_forward))
-    app.add_handler(MessageHandler(filters.ALL, log_message))
+    app.add_handler(CommandHandler("download", download_command))
+    app.add_handler(CommandHandler("logs", send_logs_command))
+    app.add_handler(CommandHandler("tasks", list_tasks_command))
 
-    log.info("✅ Bot started and polling...")
-    app.run_polling()
+    asyncio.create_task(worker_loop())
+    log.warning("✅ Bot started.")
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
