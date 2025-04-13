@@ -12,14 +12,14 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from telegram import Update, Message
-from telegram.ext import (ApplicationBuilder, CommandHandler,
-                          ContextTypes, Application)
+from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
+                          ContextTypes, Application, filters)
 import yt_dlp
 
 # --- Logging Configuration ---
 LOG_FILE = "bot.log"
 logging.basicConfig(
-    level=logging.INFO,  # Ensure info logs are visible
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
@@ -27,7 +27,7 @@ logging.basicConfig(
     ]
 )
 
-log = logging.getLogger()  # Root logger
+log = logging.getLogger()  # root logger
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
@@ -80,9 +80,10 @@ class DownloadTask:
 
     async def run(self):
         try:
+            log.info(f"[TASK] Started for {self.user_id} | URL: {self.url}")
             await asyncio.wait_for(self._process(), timeout=600)
         except asyncio.TimeoutError:
-            log.warning("[TASK] Task timed out")
+            log.warning(f"[TASK] Timeout for user {self.user_id}")
             await self.status_msg.edit_text("❌ Task timed out after 10 minutes.", parse_mode="Markdown")
         except Exception as e:
             log.error(f"[TASK] Error: {e}")
@@ -96,6 +97,7 @@ class DownloadTask:
         if os.path.exists(self.filename):
             os.remove(self.filename)
 
+        log.info(f"[YT-DLP] Fetching info for URL: {self.url}")
         info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
         title = info.get("title", "Untitled")
 
@@ -188,10 +190,13 @@ class DownloadTask:
 
 # --- Telegram Command Handlers ---
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info(f"[COMMAND] /id from {update.effective_user.id}")
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
 
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info(f"[COMMAND] /download from {update.effective_user.id}")
     if not is_allowed(update):
+        log.warning(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
         await update.message.reply_text("🚫 Not authorized.")
         return
     if not context.args:
@@ -207,6 +212,12 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task = DownloadTask(update, context, url, status_msg)
     running_tasks.add(task)
     task_queue.put_nowait(task)
+
+async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    text = update.message.text if update.message else None
+    log.info(f"[MSG] From {user.id} in chat {chat.id}: {text}")
 
 # --- Task Worker Loop ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
@@ -224,7 +235,6 @@ async def start_worker(app: Application):
 # --- Bot Setup ---
 if __name__ == "__main__":
     log.info("✅ Logger initialized.")
-
     app: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -234,6 +244,7 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_message))
 
     log.warning("✅ Bot started.")
     app.run_polling()
