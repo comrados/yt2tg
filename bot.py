@@ -144,7 +144,9 @@ class DownloadTask:
             await self._safe_edit_status("✅ Sent to Telegram")
 
     async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
-        max_retries = 10
+        max_retries = 5
+        file_name = os.path.basename(file_path)
+
         with open(file_path, 'rb') as f:
             for attempt in range(1, max_retries + 1):
                 try:
@@ -155,18 +157,18 @@ class DownloadTask:
                         parse_mode='Markdown',
                         supports_streaming=True
                     )
-                    log.info(f"[SEND] Video sent successfully to chat {chat_id}")
+                    log.info(f"[SEND] Sent file '{file_name}' to chat {chat_id}")
                     break
                 except RetryAfter as e:
                     wait_time = int(e.retry_after) + 1
-                    log.warning(f"[RETRY] Flood control. Waiting {wait_time}s (attempt {attempt}/{max_retries})...")
+                    log.warning(f"[RETRY] Flood control. Waiting {wait_time}s (attempt {attempt}/{max_retries}) for file '{file_name}'...")
                     await asyncio.sleep(wait_time)
-                    f.seek(0)  # Reset file pointer after a failed send
+                    f.seek(0)  # Reset pointer for next attempt
                 except Exception as e:
-                    log.error(f"[ERROR] Failed to send video: {e}")
+                    log.error(f"[ERROR] Failed to send file '{file_name}': {e}")
                     break
             else:
-                log.error(f"[FAIL] Could not send video to chat {chat_id} after {max_retries} retries")
+                log.error(f"[FAIL] Giving up after {max_retries} retries for file '{file_name}'")
 
     async def _safe_edit_status(self, text: str):
         try:
