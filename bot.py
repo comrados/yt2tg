@@ -7,13 +7,15 @@ import logging
 import tempfile
 import traceback
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from telegram import Update, Message
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                          ContextTypes, Application, filters)
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, Application, filters
+)
 import yt_dlp
 
 # --- Logging Configuration ---
@@ -27,7 +29,7 @@ logging.basicConfig(
     ]
 )
 
-log = logging.getLogger()  # root logger
+log = logging.getLogger()
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
@@ -65,6 +67,13 @@ def clean_youtube_url(url: str) -> Optional[str]:
     except Exception:
         return None
 
+def parse_log_time(line: str) -> datetime:
+    try:
+        timestamp = line.split()[0] + " " + line.split()[1]
+        return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S,%f")
+    except Exception:
+        return datetime.min
+
 
 class DownloadTask:
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message):
@@ -97,7 +106,6 @@ class DownloadTask:
         if os.path.exists(self.filename):
             os.remove(self.filename)
 
-        log.info(f"[YT-DLP] Fetching info for URL: {self.url}")
         info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
         title = info.get("title", "Untitled")
 
@@ -188,7 +196,7 @@ class DownloadTask:
                 except Exception as e:
                     log.warning(f"[CLEANUP] Could not remove {d}: {e}")
 
-# --- Telegram Command Handlers ---
+# --- Telegram Handlers ---
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[COMMAND] /id from {update.effective_user.id}")
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
@@ -213,13 +221,51 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running_tasks.add(task)
     task_queue.put_nowait(task)
 
-async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    text = update.message.text if update.message else None
-    log.info(f"[MSG] From {user.id} in chat {chat.id}: {text}")
+async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
 
-# --- Task Worker Loop ---
+    log.info(f"[COMMAND] /logs from {update.effective_user.id}")
+    one_hour_ago = datetime.now() - timedelta(minutes=60)
+    with open(LOG_FILE) as f:
+        lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
+
+    if not lines:
+        await update.message.reply_text("✅ No logs in the last 60 minutes.")
+        return
+
+    chunks = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) < 3900:
+            current += line
+        else:
+            chunks.append(current)
+            current = line
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await update.message.reply_text(f"```\n{chunk}\n```", parse_mode='Markdown')
+
+async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+
+    log.info(f"[COMMAND] /tasks from {update.effective_user.id}")
+    if not running_tasks:
+        await update.message.reply_text("✅ No tasks running.")
+        return
+
+    lines = [f"👤 User: {t.user_id}, ⏱️ Started: {t.created_at.strftime('%H:%M:%S')}, 🔗 URL: {t.url}" for t in running_tasks]
+    await update.message.reply_text("\n".join(lines))
+
+async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text if update.message else ""
+    log.info(f"[MSG] From {user.id}: {text}")
+
+# --- Queues & Worker ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
 running_tasks: set[DownloadTask] = set()
 
@@ -232,7 +278,7 @@ async def worker_loop():
 async def start_worker(app: Application):
     asyncio.create_task(worker_loop())
 
-# --- Bot Setup ---
+# --- Launch ---
 if __name__ == "__main__":
     log.info("✅ Logger initialized.")
     app: Application = (
@@ -244,7 +290,9 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_message))
+    app.add_handler(CommandHandler("logs", logs_command))
+    app.add_handler(CommandHandler("tasks", tasks_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_logger))
 
     log.warning("✅ Bot started.")
     app.run_polling()
