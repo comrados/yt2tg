@@ -221,21 +221,40 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
 
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.info(f"[COMMAND] /download from user {update.effective_user.id} in chat {update.effective_chat.id}")
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    log.info(f"[COMMAND] /download from user {user_id} in chat {chat_id}")
+
     if not is_allowed(update):
-        log.warning(f"[BLOCKED] Unauthorized user {update.effective_user.id}")
-        await update.message.reply_text("🚫 Not authorized.")
+        log.warning(f"[BLOCKED] Unauthorized user {user_id}")
+        if update.message:
+            await update.message.reply_text("🚫 Not authorized.")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Not authorized.")
         return
+
     if not context.args:
-        await update.message.reply_text("📎 Please provide a YouTube link.")
+        msg = "📎 Please provide a YouTube link."
+        if update.message:
+            await update.message.reply_text(msg)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=msg)
         return
 
     url = clean_youtube_url(context.args[0])
     if not url:
-        await update.message.reply_text("❌ Invalid YouTube URL.")
+        msg = "❌ Invalid YouTube URL."
+        if update.message:
+            await update.message.reply_text(msg)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=msg)
         return
 
-    status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
+    if update.message:
+        status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
+    else:
+        status_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Queued...", parse_mode="Markdown")
+
     task = DownloadTask(update, context, url, status_msg)
     running_tasks.add(task)
     task_queue.put_nowait(task)
