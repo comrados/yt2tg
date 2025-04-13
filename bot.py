@@ -10,6 +10,7 @@ import subprocess
 from datetime import datetime, timedelta
 from typing import Optional, Union
 from urllib.parse import urlparse, parse_qs
+from io import BytesIO
 
 from telegram import Update, Message, InputFile
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
@@ -199,7 +200,10 @@ async def send_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(LOG_FILE) as f:
         recent_lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
     log_data = ''.join(recent_lines) or "No logs in the last 60 minutes."
-    await update.message.reply_document(document=InputFile.from_buffer(log_data.encode(), filename="log.txt"))
+
+    buffer = BytesIO(log_data.encode())
+    buffer.name = "log.txt"
+    await update.message.reply_document(document=InputFile(buffer))
 
 def parse_log_time(line: str) -> datetime:
     try:
