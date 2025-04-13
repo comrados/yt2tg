@@ -81,7 +81,7 @@ class DownloadTask:
 
     async def run(self):
         try:
-            await asyncio.wait_for(self._process(), timeout=600)  # 10 min timeout
+            await asyncio.wait_for(self._process(), timeout=600)
         except asyncio.TimeoutError:
             log.warning("[TASK] Task timed out")
             await self.status_msg.edit_text("❌ Task timed out after 10 minutes.", parse_mode="Markdown")
@@ -112,8 +112,12 @@ class DownloadTask:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([self.url])
 
-        if not os.path.exists(self.filename):
-            raise FileNotFoundError("Downloaded file not found")
+        await asyncio.sleep(1)
+
+        if not os.path.exists(self.filename) or os.path.getsize(self.filename) < 1024:
+            raise Exception("Downloaded file is missing or too small.")
+
+        log.info(f"[CHECK] Downloaded file size: {os.path.getsize(self.filename)} bytes")
 
         size_mb = os.path.getsize(self.filename) / (1024 * 1024)
         target_chat_id = self.update.effective_chat.id if self.update.effective_chat.type == "private" else int(TARGET_CHANNEL)
@@ -125,9 +129,23 @@ class DownloadTask:
             self.temp_files.extend(paths)
             for idx, part in enumerate(paths, 1):
                 await self.status_msg.edit_text(f"📤 Sending part {idx}/{len(paths)}...", parse_mode="Markdown")
-                await self.context.bot.send_video(target_chat_id, video=InputFile(part), caption=f"🎬 *{title}* ({idx}/{len(paths)})", parse_mode='Markdown')
+                with open(part, 'rb') as f:
+                    await self.context.bot.send_video(
+                        chat_id=target_chat_id,
+                        video=f,
+                        caption=f"🎬 *{title}* ({idx}/{len(paths)})",
+                        parse_mode='Markdown',
+                        supports_streaming=True
+                    )
         else:
-            await self.context.bot.send_video(target_chat_id, video=InputFile(self.filename), caption=f"🎬 *{title}*", parse_mode='Markdown')
+            with open(self.filename, 'rb') as f:
+                await self.context.bot.send_video(
+                    chat_id=target_chat_id,
+                    video=f,
+                    caption=f"🎬 *{title}*",
+                    parse_mode='Markdown',
+                    supports_streaming=True
+                )
             await self.status_msg.edit_text("✅ Sent to Telegram", parse_mode="Markdown")
 
     def split_video(self, input_path: str, max_size_mb: int = 40, overlap_sec: int = 5) -> tuple[list[str], str]:
@@ -147,7 +165,6 @@ class DownloadTask:
             start = max(i * base_duration - overlap_sec * i, 0)
             duration = base_duration + (overlap_sec if i < chunks_count - 1 else 0)
             out_file = os.path.join(temp_dir, f"part_{i+1}.mp4")
-
             cmd = ['ffmpeg', '-y', '-ss', str(start), '-i', input_path, '-t', str(duration), '-c', 'copy', out_file]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             paths.append(out_file)
@@ -192,51 +209,6 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running_tasks.add(task)
     task_queue.put_nowait(task)
 
-async def send_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
-
-    one_hour_ago = datetime.now() - timedelta(minutes=60)
-    with open(LOG_FILE) as f:
-        lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
-
-    if not lines:
-        await update.message.reply_text("✅ No logs in the last 60 minutes.")
-        return
-
-    chunks = []
-    current_chunk = ""
-
-    for line in lines:
-        if len(current_chunk) + len(line) < 4000:
-            current_chunk += line
-        else:
-            chunks.append(current_chunk)
-            current_chunk = line
-
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    for chunk in chunks:
-        await update.message.reply_text(f"```\n{chunk}\n```", parse_mode='Markdown')
-
-def parse_log_time(line: str) -> datetime:
-    try:
-        timestamp = line.split()[0] + " " + line.split()[1]
-        return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S,%f")
-    except Exception:
-        return datetime.min
-
-async def list_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
-    if not running_tasks:
-        await update.message.reply_text("✅ No tasks running.")
-        return
-
-    lines = [f"👤 User: {t.user_id}, ⏱️ Started: {t.created_at.strftime('%H:%M:%S')}, 🔗 URL: {t.url}" for t in running_tasks]
-    await update.message.reply_text("\n".join(lines))
-
 # --- Task Worker Loop ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
 running_tasks: set[DownloadTask] = set()
@@ -261,8 +233,6 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
-    app.add_handler(CommandHandler("logs", send_logs_command))
-    app.add_handler(CommandHandler("tasks", list_tasks_command))
 
     log.warning("✅ Bot started.")
     app.run_polling()
