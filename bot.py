@@ -8,13 +8,12 @@ import tempfile
 import traceback
 import subprocess
 from datetime import datetime, timedelta
-from typing import Optional, Union
+from typing import Optional
 from urllib.parse import urlparse, parse_qs
-from io import BytesIO
 
 from telegram import Update, Message, InputFile
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                          ContextTypes, filters, Application)
+from telegram.ext import (ApplicationBuilder, CommandHandler,
+                          ContextTypes, Application)
 import yt_dlp
 
 # --- Logging Configuration ---
@@ -196,14 +195,30 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
+
     one_hour_ago = datetime.now() - timedelta(minutes=60)
     with open(LOG_FILE) as f:
-        recent_lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
-    log_data = ''.join(recent_lines) or "No logs in the last 60 minutes."
+        lines = [line for line in f if parse_log_time(line) >= one_hour_ago]
 
-    buffer = BytesIO(log_data.encode())
-    buffer.name = "log.txt"
-    await update.message.reply_document(document=InputFile(buffer))
+    if not lines:
+        await update.message.reply_text("✅ No logs in the last 60 minutes.")
+        return
+
+    chunks = []
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) < 4000:
+            current_chunk += line
+        else:
+            chunks.append(current_chunk)
+            current_chunk = line
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    for chunk in chunks:
+        await update.message.reply_text(f"```\n{chunk}\n```", parse_mode='Markdown')
 
 def parse_log_time(line: str) -> datetime:
     try:
