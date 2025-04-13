@@ -194,7 +194,6 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
-        await update.message.reply_text("🚫 Not authorized.")
         return
     one_hour_ago = datetime.now() - timedelta(minutes=60)
     with open(LOG_FILE) as f:
@@ -211,7 +210,6 @@ def parse_log_time(line: str) -> datetime:
 
 async def list_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
-        await update.message.reply_text("🚫 Not authorized.")
         return
     if not running_tasks:
         await update.message.reply_text("✅ No tasks running.")
@@ -230,11 +228,15 @@ async def worker_loop():
         await task.run()
         task_queue.task_done()
 
+async def start_worker(app: Application):
+    asyncio.create_task(worker_loop())
+
 # --- Bot Setup ---
-async def main():
+if __name__ == "__main__":
     app: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .post_init(start_worker)
         .build()
     )
 
@@ -243,9 +245,5 @@ async def main():
     app.add_handler(CommandHandler("logs", send_logs_command))
     app.add_handler(CommandHandler("tasks", list_tasks_command))
 
-    asyncio.create_task(worker_loop())
     log.warning("✅ Bot started.")
-    await app.run_polling()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    app.run_polling()
