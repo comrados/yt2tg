@@ -19,7 +19,7 @@ import yt_dlp
 # --- Logging Configuration ---
 LOG_FILE = "bot.log"
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,  # Ensure info logs are visible
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
@@ -27,10 +27,9 @@ logging.basicConfig(
     ]
 )
 
-log = logging.getLogger("ytbot")
+log = logging.getLogger()  # Root logger
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram.bot").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext._application").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # --- Config Loading ---
 with open("config.json") as f:
@@ -224,6 +223,8 @@ async def start_worker(app: Application):
 
 # --- Bot Setup ---
 if __name__ == "__main__":
+    log.info("✅ Logger initialized.")
+
     app: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
