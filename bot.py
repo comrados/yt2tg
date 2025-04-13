@@ -7,11 +7,11 @@ import logging
 import tempfile
 import traceback
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
-from telegram import Update, Message, InputFile
+from telegram import Update, Message
 from telegram.ext import (ApplicationBuilder, CommandHandler,
                           ContextTypes, Application)
 import yt_dlp
