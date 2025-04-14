@@ -336,10 +336,13 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.message:
         status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
+        message_id = update.message.message_id
     else:
         status_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Queued...", parse_mode="Markdown")
+        message_id = status_msg.message_id
 
-    mark_as_processed(chat_id, video_id, update.message.message_id, "processing")
+    mark_as_processed(chat_id, video_id, message_id, "processing")
+
     log.info(f"[DB] Marked video {video_id} as 'processing' in chat {chat_id}")
 
     task = DownloadTask(update, context, url, status_msg)
@@ -398,7 +401,6 @@ async def retry_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data.split("|")
     if len(data) != 3:
         await query.edit_message_text("❌ Invalid retry request.")
-        return
 
     _, video_id, url = data
     chat_id = query.message.chat_id
