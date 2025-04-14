@@ -409,19 +409,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "cancel":
         video_id = data[1] if len(data) > 1 else "unknown"
         log.info(f"[CANCEL] User {user_id} canceled re-download for video {video_id} in chat {chat_id}")
-        await query.edit_message_text("❌ Re-download canceled.")
+        await query.edit_message_text("❌ Re-download canceled")
         return
 
     if action == "retry" and len(data) == 3:
         video_id, url = data[1], data[2]
         log.info(f"[RETRY] User {user_id} requested re-download of video {video_id} in chat {chat_id}")
         try:
-            await query.edit_message_text("🔁 Re-download requested.")
+            await query.edit_message_text("🔁 Re-downloading...")
 
-            status_msg = await query.message.reply_text("🔁 Re-downloading...", parse_mode="Markdown")
             mark_as_processed(chat_id, video_id, query.message.message_id, "processing")
 
-            task = DownloadTask(update, context, url, status_msg)
+            task = DownloadTask(update, context, url, query.message)
             running_tasks.add(task)
             task_queue.put_nowait(task)
 
@@ -430,6 +429,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Failed to start retry.")
     else:
         await query.edit_message_text("❌ Invalid action.")
+
 
 
 # --- Queues & Worker ---
