@@ -323,11 +323,14 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if is_already_processed(chat_id, video_id):
-        log.info(f"[SKIP] Already processed video {video_id} in chat {chat_id}")
+        log.info(f"[RETRY] Already processed video {video_id} in chat {chat_id}")
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔁 Download Again", callback_data=f"retry|{video_id}|{url}")
-        ]])
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔁 Download Again", callback_data=f"retry|{video_id}|{url}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{video_id}")
+            ]
+        ])
         await update.message.reply_text(
             "✅ This video was already processed in this chat.\nDo you want to download it again?",
             reply_markup=keyboard
@@ -394,33 +397,40 @@ async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     log.info(f"[MSG] From user {user.id} in chat {chat}: {text}")
 
-async def retry_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query: CallbackQuery = update.callback_query
     await query.answer()
 
     data = query.data.split("|")
-    if len(data) != 3:
-        await query.edit_message_text("❌ Invalid retry request.")
-
-    _, video_id, url = data
+    action = data[0]
     chat_id = query.message.chat_id
     user_id = query.from_user.id
 
-    log.info(f"[RETRY] User {user_id} requested re-download of video {video_id} in chat {chat_id}")
+    if action == "cancel":
+        video_id = data[1] if len(data) > 1 else "unknown"
+        log.info(f"[CANCEL] User {user_id} canceled re-download for video {video_id} in chat {chat_id}")
+        await query.edit_message_text("❌ Re-download canceled.")
+        return
 
-    try:
-        await query.edit_message_text("🔁 Re-download requested.")
+    if action == "retry" and len(data) == 3:
+        video_id, url = data[1], data[2]
+        log.info(f"[RETRY] User {user_id} requested re-download of video {video_id} in chat {chat_id}")
+        try:
+            await query.edit_message_text("🔁 Re-download requested.")
 
-        status_msg = await query.message.reply_text("🔁 Re-downloading...", parse_mode="Markdown")
-        mark_as_processed(chat_id, video_id, query.message.message_id, "processing")
+            status_msg = await query.message.reply_text("🔁 Re-downloading...", parse_mode="Markdown")
+            mark_as_processed(chat_id, video_id, query.message.message_id, "processing")
 
-        task = DownloadTask(update, context, url, status_msg)
-        running_tasks.add(task)
-        task_queue.put_nowait(task)
+            task = DownloadTask(update, context, url, status_msg)
+            running_tasks.add(task)
+            task_queue.put_nowait(task)
 
-    except Exception as e:
-        log.error(f"[RETRY_FAIL] Could not start retry for {video_id}: {e}")
-        await query.edit_message_text("❌ Failed to start retry.")
+        except Exception as e:
+            log.error(f"[RETRY_FAIL] Could not start retry for {video_id}: {e}")
+            await query.edit_message_text("❌ Failed to start retry.")
+    else:
+        await query.edit_message_text("❌ Invalid action.")
+
 
 # --- Queues & Worker ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
@@ -449,7 +459,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("download", download_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
-    app.add_handler(CallbackQueryHandler(retry_button_handler))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_logger))
 
     log.warning("✅ Bot started.")
