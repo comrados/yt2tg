@@ -11,28 +11,59 @@ from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
-from telegram import Update, Message
+import sqlite3
+from contextlib import closing
+
+from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.error import RetryAfter
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, Application, filters
+    ContextTypes, Application, filters, CallbackQueryHandler
 )
 import yt_dlp
 
 # --- Logging Configuration ---
-LOG_FILE = "bot.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+LOG_FILE = "logs/bot.log"
 
-log = logging.getLogger()
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+def init_logging(log_path: str = LOG_FILE, overwrite: bool = True):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, mode='w' if overwrite else 'a'),
+            logging.StreamHandler()
+        ]
+    )
+
+    log = logging.getLogger()
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    return log
+
+log = init_logging()
+
+# --- DB Configuration ---
+DB_PATH = "data/bot.db"
+
+def init_db(db_path: str = DB_PATH):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS processed_videos (
+                chat_id INTEGER,
+                video_id TEXT,
+                message_id INTEGER,
+                status TEXT,
+                PRIMARY KEY (chat_id, video_id)
+            )
+        """)
+        conn.commit()
+
+init_db()
 
 # --- Config Loading ---
 with open("config.json") as f:
@@ -46,7 +77,7 @@ TARGET_CHANNEL: str = config["target_channel"]
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
-def clean_youtube_url(url: str) -> Optional[str]:
+def get_video_id(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
         host = parsed.hostname.lower() if parsed.hostname else ''
@@ -61,12 +92,34 @@ def clean_youtube_url(url: str) -> Optional[str]:
             query = parse_qs(parsed.query)
             video_id = query.get('v', [None])[0]
 
-        if not video_id or not re.match(r'^[\w-]{11}$', video_id):
-            return None
-
-        return f"https://youtu.be/{video_id}"
+        if video_id and re.match(r'^[\w-]{11}$', video_id):
+            return video_id
+        return None
     except Exception:
         return None
+
+def clean_youtube_url(url: str) -> Optional[str]:
+    video_id = get_video_id(url)
+    return f"https://youtu.be/{video_id}" if video_id else None
+
+def is_already_processed(chat_id: int, video_id: str) -> bool:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        c = conn.cursor()
+        c.execute("SELECT status FROM processed_videos WHERE chat_id = ? AND video_id = ?", (chat_id, video_id))
+        result = c.fetchone()
+        log.info(f"[DB] Checked if video {video_id} in chat {chat_id} is already processed: {result}")
+        return result and result[0] == "success"
+
+
+def mark_as_processed(chat_id: int, video_id: str, message_id: int, status: str):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO processed_videos (chat_id, video_id, message_id, status) VALUES (?, ?, ?, ?)",
+            (chat_id, video_id, message_id, status)
+        )
+        conn.commit()
+    log.info(f"[DB] Marked video {video_id} in chat {chat_id} as '{status}'")
 
 def parse_log_time(line: str) -> datetime:
     try:
@@ -75,6 +128,7 @@ def parse_log_time(line: str) -> datetime:
     except Exception:
         return datetime.min
 
+# --- Download task ---
 class DownloadTask:
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message):
         self.update = update
@@ -94,13 +148,21 @@ class DownloadTask:
         except asyncio.TimeoutError:
             log.warning(f"[TASK] Timeout for user {self.user_id}")
             await self._safe_edit_status("❌ Task timed out after 10 minutes.")
+            video_id = get_video_id(self.url)
+            if video_id:
+                mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "failed")
         except Exception as e:
             log.error(f"[TASK] Error: {e}")
             log.debug(traceback.format_exc())
             await self._safe_edit_status(f"❌ Error: {e}")
+            video_id = get_video_id(self.url)
+            if video_id:
+                mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "failed")
         finally:
             await self.cleanup()
             running_tasks.discard(self)
+
+
 
     async def _process(self):
         if os.path.exists(self.filename):
@@ -142,6 +204,10 @@ class DownloadTask:
         else:
             await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{title}*")
             await self._safe_edit_status("✅ Sent to Telegram")
+
+        video_id = get_video_id(self.url)
+        if video_id:
+            mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "success")
 
     async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
         max_retries = 5
@@ -250,10 +316,31 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=msg)
         return
 
+    video_id = get_video_id(url)
+    if not video_id:
+        msg = "❌ Could not extract video ID."
+        await update.message.reply_text(msg)
+        return
+
+    if is_already_processed(chat_id, video_id):
+        log.info(f"[SKIP] Already processed video {video_id} in chat {chat_id}")
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔁 Download Again", callback_data=f"retry|{video_id}|{url}")
+        ]])
+        await update.message.reply_text(
+            "✅ This video was already processed in this chat.\nDo you want to download it again?",
+            reply_markup=keyboard
+        )
+        return
+
     if update.message:
         status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
     else:
         status_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Queued...", parse_mode="Markdown")
+
+    mark_as_processed(chat_id, video_id, update.message.message_id, "processing")
+    log.info(f"[DB] Marked video {video_id} as 'processing' in chat {chat_id}")
 
     task = DownloadTask(update, context, url, status_msg)
     running_tasks.add(task)
@@ -304,6 +391,35 @@ async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     log.info(f"[MSG] From user {user.id} in chat {chat}: {text}")
 
+async def retry_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    data = query.data.split("|")
+    if len(data) != 3:
+        await query.edit_message_text("❌ Invalid retry request.")
+        return
+
+    _, video_id, url = data
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+
+    log.info(f"[RETRY] User {user_id} requested re-download of video {video_id} in chat {chat_id}")
+
+    try:
+        await query.edit_message_text("🔁 Re-download requested.")
+
+        status_msg = await query.message.reply_text("🔁 Re-downloading...", parse_mode="Markdown")
+        mark_as_processed(chat_id, video_id, query.message.message_id, "processing")
+
+        task = DownloadTask(update, context, url, status_msg)
+        running_tasks.add(task)
+        task_queue.put_nowait(task)
+
+    except Exception as e:
+        log.error(f"[RETRY_FAIL] Could not start retry for {video_id}: {e}")
+        await query.edit_message_text("❌ Failed to start retry.")
+
 # --- Queues & Worker ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
 running_tasks: set[DownloadTask] = set()
@@ -331,6 +447,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("download", download_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
+    app.add_handler(CallbackQueryHandler(retry_button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_logger))
 
     log.warning("✅ Bot started.")
