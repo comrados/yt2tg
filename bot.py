@@ -135,7 +135,8 @@ class DownloadTask:
         self.context = context
         self.url = url
         self.status_msg = status_msg
-        self.filename = "video.mp4"
+        self.video_id = get_video_id(url)
+        self.filename = f"video_{self.video_id}.mp4"
         self.temp_files: list[str] = []
         self.temp_dirs: list[str] = []
         self.created_at = datetime.now()
@@ -148,16 +149,14 @@ class DownloadTask:
         except asyncio.TimeoutError:
             log.warning(f"[TASK] Timeout for user {self.user_id}")
             await self._safe_edit_status("❌ Task timed out after 10 minutes.")
-            video_id = get_video_id(self.url)
-            if video_id:
-                mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "failed")
+            if self.video_id:
+                mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "failed")
         except Exception as e:
             log.error(f"[TASK] Error: {e}")
             log.debug(traceback.format_exc())
             await self._safe_edit_status(f"❌ Error: {e}")
-            video_id = get_video_id(self.url)
-            if video_id:
-                mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "failed")
+            if self.video_id:
+                mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "failed")
         finally:
             await self.cleanup()
             running_tasks.discard(self)
@@ -205,9 +204,8 @@ class DownloadTask:
             await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{title}*")
             await self._safe_edit_status("✅ Sent to Telegram")
 
-        video_id = get_video_id(self.url)
-        if video_id:
-            mark_as_processed(self.update.effective_chat.id, video_id, self.update.effective_message.message_id, "success")
+        if self.video_id:
+            mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "success")
 
     async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
         max_retries = 5
@@ -258,7 +256,7 @@ class DownloadTask:
         for i in range(chunks_count):
             start = max(i * base_duration - overlap_sec * i, 0)
             duration = base_duration + (overlap_sec if i < chunks_count - 1 else 0)
-            out_file = os.path.join(temp_dir, f"part_{i+1}.mp4")
+            out_file = os.path.join(temp_dir, f"part_{i+1}_{self.video_id}.mp4")
             cmd = ['ffmpeg', '-y', '-ss', str(start), '-i', input_path, '-t', str(duration), '-c', 'copy', out_file]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             paths.append(out_file)
