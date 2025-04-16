@@ -136,7 +136,7 @@ def parse_log_time(line: str) -> datetime:
 
 # --- Download task ---
 class DownloadTask:
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg: Message, original_message_id: int):
         self.update = update
         self.context = context
         self.url = url
@@ -147,6 +147,7 @@ class DownloadTask:
         self.temp_dirs: list[str] = []
         self.created_at = datetime.now()
         self.user_id = update.effective_user.id
+        self.original_message_id = original_message_id # Store it
 
     def __hash__(self):
         return hash((self.update.effective_chat.id, self.video_id))
@@ -162,20 +163,22 @@ class DownloadTask:
         try:
             log.info(f"[TASK] Started for user {self.user_id} in chat {self.update.effective_chat.id} | URL: {self.url}")
             await asyncio.wait_for(self._process(), timeout=600)
+
         except asyncio.TimeoutError:
-            log.warning(f"[TASK] Timeout for user {self.user_id}")
+            log.warning(f"[TASK] Timeout for user {self.user_id} in chat {self.update.effective_chat.id} | Video: {self.video_id}")
             await self._safe_edit_status("❌ Task timed out after 10 minutes.")
             if self.video_id:
-                mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "failed")
+                mark_as_processed(self.update.effective_chat.id, self.video_id, self.original_message_id, "failed")
+
         except Exception as e:
-            log.error(f"[TASK] Error: {e}")
-            log.debug(traceback.format_exc())
-            await self._safe_edit_status(f"❌ Error: {e}")
+            log.error(f"[TASK] Error processing video {self.video_id} for user {self.user_id}: {e}", exc_info=True)
+            await self._safe_edit_status(f"❌ Error processing video.")
             if self.video_id:
-                mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "failed")
+                mark_as_processed(self.update.effective_chat.id, self.video_id, self.original_message_id, "failed")
         finally:
             await self.cleanup()
-            running_tasks.discard(self)
+            if self in running_tasks:
+                running_tasks.discard(self)
 
 
 
@@ -218,10 +221,10 @@ class DownloadTask:
                 await self._send_video_with_retry(target_chat_id, part, f"🎬 *{title}* ({idx}/{len(paths)})")
         else:
             await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{title}*")
-            await self._safe_edit_status("✅ Sent to Telegram")
 
         if self.video_id:
             mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "success")
+            await self._safe_edit_status("✅ Sent to Telegram")
 
     async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
         max_retries = 5
@@ -301,72 +304,76 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
 
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    message = update.message or update.channel_post
+    
+    if not message:
+         log.warning("Received update without message or channel_post in download_command")
+         return
+
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     log.info(f"[COMMAND] /download from user {user_id} in chat {chat_id}")
 
     if not is_allowed(update):
         log.warning(f"[BLOCKED] Unauthorized user {user_id}")
-        if update.message:
-            await update.message.reply_text("🚫 Not authorized.")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 Not authorized.")
+        await message.reply_text("🚫 Not authorized.")
         return
 
     if not context.args:
-        msg = "📎 Please provide a YouTube link."
-        if update.message:
-            await update.message.reply_text(msg)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
+        await message.reply_text("📎 Please provide a YouTube link.")
         return
 
     url = clean_youtube_url(context.args[0])
     if not url:
-        msg = "❌ Invalid YouTube URL."
-        if update.message:
-            await update.message.reply_text(msg)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
+        await message.reply_text("❌ Invalid YouTube URL.")
         return
 
     video_id = get_video_id(url)
     if not video_id:
-        msg = "❌ Could not extract video ID."
-        await update.message.reply_text(msg)
-        return
-    
-    if is_task_queued_or_running(chat_id, video_id):
-        log.info(f"[SKIP] Task for video {video_id} already running in chat {chat_id}")
+        await message.reply_text("❌ Could not extract video ID.")
         return
 
-    if is_already_processed(chat_id, video_id):
+    # --- Check for existing/processing tasks ---
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        c = conn.cursor()
+        c.execute("SELECT status FROM processed_videos WHERE chat_id = ? AND video_id = ?", (chat_id, video_id))
+        result = c.fetchone()
+        status = result[0] if result else None
+        log.info(f"[DB] Checked video {video_id} in chat {chat_id}. Status: {status}")
+
+    if status == "processing":
+        # Check if it's REALLY running or just stuck in DB
+        if is_task_queued_or_running(chat_id, video_id):
+             log.info(f"[SKIP] Task for video {video_id} actively processing/queued in chat {chat_id}")
+             await message.reply_text("⏳ This video is currently being processed.", parse_mode="Markdown")
+             return
+        else:
+            # Status is 'processing' but no active task found - maybe it crashed? Treat as retryable.
+            log.warning(f"[STALE] Video {video_id} in chat {chat_id} marked 'processing' but no active task found. Allowing retry.")
+            status = "failed"
+
+    if status == "success":
         log.info(f"[RETRY] Already processed video {video_id} in chat {chat_id}")
-
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🔁 Download Again", callback_data=f"retry|{video_id}|{url}"),
                 InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{video_id}")
             ]
         ])
-        await update.message.reply_text(
+        await message.reply_text(
             "✅ This video was already processed in this chat.\nDo you want to download it again?",
             reply_markup=keyboard
         )
         return
 
-    if update.message:
-        status_msg = await update.message.reply_text("✅ Queued...", parse_mode="Markdown")
-        message_id = update.message.message_id
-    else:
-        status_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Queued...", parse_mode="Markdown")
-        message_id = status_msg.message_id
+    # --- Proceed with new download (status is None or failed/stale 'processing') ---
+    status_msg = await message.reply_text("✅ Queued...", parse_mode="Markdown")
+    message_id = message.message_id
 
     mark_as_processed(chat_id, video_id, message_id, "processing")
 
-    log.info(f"[DB] Marked video {video_id} as 'processing' in chat {chat_id}")
-
-    task = DownloadTask(update, context, url, status_msg)
+    task = DownloadTask(update, context, url, status_msg, message_id)
     running_tasks.add(task)
     task_queue.put_nowait(task)
 
@@ -435,20 +442,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"[RETRY] User {user_id} requested re-download of video {video_id} in chat {chat_id}")
         try:
             await query.edit_message_text("🔁 Re-downloading...")
+            original_retry_message_id = query.message.message_id
 
-            mark_as_processed(chat_id, video_id, query.message.message_id, "processing")
+            mark_as_processed(chat_id, video_id, original_retry_message_id, "processing")
 
-            task = DownloadTask(update, context, url, query.message)
+            task = DownloadTask(update, context, url, query.message, original_retry_message_id)
             running_tasks.add(task)
             task_queue.put_nowait(task)
 
         except Exception as e:
-            log.error(f"[RETRY_FAIL] Could not start retry for {video_id}: {e}")
+            log.error(f"[RETRY_FAIL] Could not start retry for {video_id}: {e}", exc_info=True)
             await query.edit_message_text("❌ Failed to start retry.")
     else:
         await query.edit_message_text("❌ Invalid action.")
 
-
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
 # --- Queues & Worker ---
 task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
@@ -472,6 +481,8 @@ if __name__ == "__main__":
         .post_init(start_worker)
         .build()
     )
+
+    app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
