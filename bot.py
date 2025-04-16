@@ -77,6 +77,12 @@ TARGET_CHANNEL: str = config["target_channel"]
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
+def is_task_queued_or_running(chat_id: int, video_id: str) -> bool:
+    return any(
+        t.video_id == video_id and t.update.effective_chat.id == chat_id
+        for t in running_tasks.union(task_queue._queue)
+    )
+
 def get_video_id(url: str) -> Optional[str]:
     try:
         parsed = urlparse(url)
@@ -141,6 +147,16 @@ class DownloadTask:
         self.temp_dirs: list[str] = []
         self.created_at = datetime.now()
         self.user_id = update.effective_user.id
+
+    def __hash__(self):
+        return hash((self.update.effective_chat.id, self.video_id))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, DownloadTask) and
+            self.update.effective_chat.id == other.update.effective_chat.id and
+            self.video_id == other.video_id
+        )
 
     async def run(self):
         try:
@@ -318,6 +334,10 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not video_id:
         msg = "❌ Could not extract video ID."
         await update.message.reply_text(msg)
+        return
+    
+    if is_task_queued_or_running(chat_id, video_id):
+        log.info(f"[SKIP] Task for video {video_id} already running in chat {chat_id}")
         return
 
     if is_already_processed(chat_id, video_id):
