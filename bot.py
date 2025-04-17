@@ -75,7 +75,10 @@ TARGET_CHANNEL: str = config["target_channel"]
 
 # --- Utility Functions ---
 def is_allowed(update: Update) -> bool:
-    return update.effective_user.id in ALLOWED_USERS
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    return user_id in ALLOWED_USERS and (chat_id == user_id or chat_id == TARGET_CHANNEL)
 
 def is_task_queued_or_running(chat_id: int, video_id: str) -> bool:
     return any(
