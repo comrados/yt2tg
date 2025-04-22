@@ -222,17 +222,25 @@ class DownloadTask:
             paths, temp_dir = self.split_video(self.filename)
             self.temp_dirs.append(temp_dir)
             self.temp_files.extend(paths)
+
             for idx, part in enumerate(paths, 1):
                 await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
-                await self._send_video_with_retry(target_chat_id, part, f"🎬 *{safe_title}* ({idx}/{len(paths)})")
+                caption = f"🎬 *{safe_title}* \\({idx}/{len(paths)}\\)"
+                success = await self._send_video_with_retry(target_chat_id, part, caption)
+                if not success:
+                    raise Exception(f"Failed to send part {idx}/{len(paths)}")
         else:
-            await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{safe_title}*")
+            caption = f"🎬 *{safe_title}*"
+            success = await self._send_video_with_retry(target_chat_id, self.filename, caption)
+            if not success:
+                raise Exception("Failed to send the video.")
 
+        # Only mark as success after ALL parts sent successfully
         if self.video_id:
             mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "success")
             await self._safe_edit_status("✅ Sent to Telegram")
 
-    async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str):
+    async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str) -> bool:
         max_retries = 5
         file_name = os.path.basename(file_path)
 
@@ -247,17 +255,17 @@ class DownloadTask:
                         supports_streaming=True
                     )
                     log.info(f"[SEND] Sent file '{file_name}' to chat {chat_id}")
-                    break
+                    return True
                 except RetryAfter as e:
                     wait_time = int(e.retry_after) + 1
                     log.warning(f"[RETRY] Flood control. Waiting {wait_time}s (attempt {attempt}/{max_retries}) for file '{file_name}'...")
                     await asyncio.sleep(wait_time)
-                    f.seek(0)  # Reset pointer for next attempt
+                    f.seek(0)
                 except Exception as e:
                     log.error(f"[ERROR] Failed to send file '{file_name}': {e}")
-                    break
-            else:
-                log.error(f"[FAIL] Giving up after {max_retries} retries for file '{file_name}'")
+                    return False
+            log.error(f"[FAIL] Giving up after {max_retries} retries for file '{file_name}'")
+            return False
 
     async def _safe_edit_status(self, text: str):
         try:
