@@ -16,6 +16,7 @@ from contextlib import closing
 
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.error import RetryAfter
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, Application, filters, CallbackQueryHandler
@@ -191,6 +192,8 @@ class DownloadTask:
 
         info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
         title = info.get("title", "Untitled")
+        log.info(f"[SEND] Sending video titled: {title}")
+        safe_title = escape_markdown(title, version=2)
 
         await self._safe_edit_status("⏬ Downloading video (360p)...")
         ydl_opts = {
@@ -221,9 +224,9 @@ class DownloadTask:
             self.temp_files.extend(paths)
             for idx, part in enumerate(paths, 1):
                 await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
-                await self._send_video_with_retry(target_chat_id, part, f"🎬 *{title}* ({idx}/{len(paths)})")
+                await self._send_video_with_retry(target_chat_id, part, f"🎬 *{safe_title}* ({idx}/{len(paths)})")
         else:
-            await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{title}*")
+            await self._send_video_with_retry(target_chat_id, self.filename, f"🎬 *{safe_title}*")
 
         if self.video_id:
             mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "success")
@@ -240,7 +243,7 @@ class DownloadTask:
                         chat_id=chat_id,
                         video=f,
                         caption=caption,
-                        parse_mode='Markdown',
+                        parse_mode='MarkdownV2',
                         supports_streaming=True
                     )
                     log.info(f"[SEND] Sent file '{file_name}' to chat {chat_id}")
