@@ -412,7 +412,7 @@ async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TY
         log.warning(f"[BLOCKED] Unauthorized user {user_id} tried /checkcookies")
         return
 
-    await update.message.reply_text("🔍 Checking cookies...")
+    status_msg = await update.message.reply_text("🔍 Checking cookies...")
 
     result = init_cookies()
 
@@ -449,10 +449,17 @@ async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         log.error(f"[COOKIES] Failed to parse expiry info: {e}", exc_info=True)
 
-    if result:
-        await update.message.reply_text(f"✅ Cookies are valid and working.\n{expiry_info}")
-    else:
-        await update.message.reply_text(f"❌ Cookies are missing or invalid.\n{expiry_info}")
+    final_msg = (
+        f"✅ Cookies are valid and working.\n{expiry_info}"
+        if result else
+        f"❌ Cookies are missing or invalid.\n{expiry_info}"
+    )
+
+    try:
+        await status_msg.edit_text(final_msg)
+    except Exception as e:
+        log.warning(f"[EDIT_FAIL] Could not edit cookie status message: {e}")
+        await update.message.reply_text(final_msg)
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[COMMAND] /id from user {update.effective_user.id} in chat {update.effective_chat.id}")
