@@ -8,7 +8,8 @@ services:
     mem_limit: 512m
     memswap_limit: 1g
     volumes:
-      - ./config.json:/app/config.json:ro     # read-only config json
+      - ./config.json:/app/config.json:ro     # read-only config.json
+      - ./cookies.txt:/app/cookies.txt:ro     # read-only cookies.txt
       - ./data:/app/data                      # persistent bot data
       - ./logs:/app/logs                      # persistent logs
     environment:

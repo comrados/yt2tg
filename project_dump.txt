@@ -1,3 +1,67 @@
+# Project Dump for: C:\Code\yt2tg
+# Config Source: 'config.json' merged with defaults
+#
+# Ignored Directories:
+  ['.git', '__pycache__', '.idea', '.vscode', 'node_modules', 'venv',
+  '.env', 'dist', 'build']
+#
+# Allowed Extensions/Files:
+  ['.py', '.txt', '.json', '.env', '.yml', '.yaml', '.dockerfile',
+  'Dockerfile', '.gitignore', '.dockerignore']
+
+================================================================================
+                              DIRECTORY TREE
+================================================================================
+
+yt2tg/
+    ├── .dockerignore
+    ├── Dockerfile
+    ├── bot.py
+    ├── config.json
+    ├── docker-compose.yml
+    └── requirements.txt
+
+================================================================================
+                              FILE CONTENTS
+================================================================================
+
+---
+File: .dockerignore
+---
+
+__pycache__/
+*.pyc
+*.mp4
+
+
+---
+File: Dockerfile
+---
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ffmpeg \
+    ca-certificates && \
+    pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
+
+COPY . .
+
+CMD ["python", "bot.py"]
+
+---
+File: bot.py
+---
+
 import os
 import re
 import json
@@ -5,6 +69,7 @@ import math
 import asyncio
 import logging
 import tempfile
+import traceback
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
@@ -15,7 +80,6 @@ from contextlib import closing
 
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.error import RetryAfter
-from yt_dlp.utils import DownloadError
 from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -65,34 +129,6 @@ def init_db(db_path: str = DB_PATH):
         conn.commit()
 
 init_db()
-
-# --- Cookies Configuration ---
-COOKIES_FILE = "cookies.txt"
-
-def init_cookies(cookies_path: str = COOKIES_FILE) -> bool:
-    if not os.path.exists(cookies_path):
-        log.warning("[COOKIES] cookies.txt not found.")
-        return False
-
-    try:
-        test_url = "https://youtu.be/nddkvl_qqBk"  # An age-restricted video
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            'cookiefile': cookies_path,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(test_url, download=False)
-        log.info("[COOKIES] Cookies are valid ✅")
-        return True
-    except DownloadError as e:
-        log.warning(f"[COOKIES] Invalid or insufficient cookies: {e}")
-    except Exception as e:
-        log.error(f"[COOKIES] Failed to validate cookies: {e}", exc_info=True)
-
-    return False
-
-cookies_available = init_cookies()
 
 # --- Config Loading ---
 with open("config.json") as f:
@@ -202,24 +238,6 @@ class DownloadTask:
             if self.video_id:
                 mark_as_processed(self.update.effective_chat.id, self.video_id, self.original_message_id, "failed")
 
-        except DownloadError as e:
-            log.error(f"[TASK] DownloadError processing video {self.video_id} for user {self.user_id}: {e}")
-            error_message = str(e)
-            user_message = "❌ Download error."
-            if "Sign in to confirm your age" in error_message:
-                if cookies_available:
-                    user_message = f"❌ Age restricted video failed. Cookies might be invalid/expired."
-                else:
-                    user_message = f"❌ Age restricted video failed. Add a valid '{COOKIES_FILE}'."
-            elif "unavailable" in error_message.lower():
-                user_message = "❌ Video is unavailable."
-            else:
-                user_message = f"❌ Download error: {error_message[:100]}"
-
-            await self._safe_edit_status(user_message)
-            if self.video_id:
-                mark_as_processed(self.update.effective_chat.id, self.video_id, self.original_message_id, "failed")
-
         except Exception as e:
             log.error(f"[TASK] Error processing video {self.video_id} for user {self.user_id}: {e}", exc_info=True)
             await self._safe_edit_status(f"❌ Error processing video.")
@@ -236,25 +254,7 @@ class DownloadTask:
         if os.path.exists(self.filename):
             os.remove(self.filename)
 
-        info_ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            **({'cookiefile': COOKIES_FILE} if cookies_available else {})
-        }
-        with yt_dlp.YoutubeDL(info_ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(self.url, download=False)
-            except DownloadError as e:
-                log.error(f"[TASK] Failed to extract info for {self.video_id}: {e}")
-                error_message = str(e)
-                if "confirm your age" in error_message and not cookies_available:
-                    await self._safe_edit_status(f"❌ Age restricted video. Add '{COOKIES_FILE}'.")
-                elif "confirm your age" in error_message:
-                    await self._safe_edit_status(f"❌ Age restricted video. Cookies invalid?")
-                else:
-                    await self._safe_edit_status(f"❌ Failed to get video info.")
-                raise e
-
+        info = yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}).extract_info(self.url, download=False)
         title = info.get("title", "Untitled")
         log.info(f"[SEND] Sending video titled: {title}")
         safe_title = escape_markdown(title, version=2)
@@ -265,10 +265,8 @@ class DownloadTask:
             'outtmpl': self.filename,
             'quiet': True,
             'noplaylist': True,
-            'no_warnings': True,
-            **({'cookiefile': COOKIES_FILE} if cookies_available else {})
+            'no_warnings': True
         }
-
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([self.url])
@@ -573,3 +571,47 @@ if __name__ == "__main__":
 
     log.warning("✅ Bot started.")
     app.run_polling()
+
+
+---
+File: config.json
+---
+
+{
+    "bot_token": "BOT_TOKEN",
+    "allowed_users": [
+        987654321,
+        123456789
+    ],
+    "target_channel": -123456789
+}
+
+---
+File: docker-compose.yml
+---
+
+version: "3.9"
+
+services:
+  ytbot:
+    container_name: yt2tg
+    build: .
+    restart: always
+    mem_limit: 512m
+    memswap_limit: 1g
+    volumes:
+      - ./config.json:/app/config.json:ro     # read-only config json
+      - ./data:/app/data                      # persistent bot data
+      - ./logs:/app/logs                      # persistent logs
+    environment:
+      - TZ=Europe/Berlin
+
+
+---
+File: requirements.txt
+---
+
+python-telegram-bot
+yt-dlp
+
+

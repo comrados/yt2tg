@@ -1,0 +1,15 @@
+# Netscape HTTP Cookie File
+# http://www.netscape.com/newsref/std/cookie_spec.html
+# This is a generated file! Do not edit.
+#
+# THIS IS A FAKE EXAMPLE - REPLACE WITH YOUR *REAL* COOKIES
+# Values like expiry timestamp, domain flags, and cookie values will be different.
+
+# Domain          Flag   Path  Secure Expiry     Name            Value
+.youtube.com      TRUE   /     TRUE   1711111111  LOGIN_INFO      FAKE_LOGIN_INFO_VALUE_ABCDEFG1234567890
+.youtube.com      TRUE   /     TRUE   1722222222  PREF            f1=50000000&f6=8&f7=100&gl=DE&hl=en&pc=yt&tz=Europe.Berlin
+.youtube.com      TRUE   /     TRUE   1733333333  VISITOR_INFO1_LIVE Y_U_NO_REAL_COOKIE?
+.youtube.com      TRUE   /     TRUE   1744444444  YSC             FAKE_SESSION_ID-GoesHere
+.youtube.com      TRUE   /     TRUE   0           __Secure-3PAPISID FAKE_SECURE_ID/BlahBlah
+.youtube.com      TRUE   /     TRUE   0           __Secure-3PSID    FAKE_SECURE_ID_Longer_One_Maybe
+# ... possibly many more lines ...
