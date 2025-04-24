@@ -6,6 +6,7 @@ import asyncio
 import logging
 import tempfile
 import subprocess
+import shutil
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
@@ -75,12 +76,15 @@ def init_cookies(cookies_path: str = COOKIES_FILE) -> bool:
         return False
 
     try:
-        test_url = "https://youtu.be/nddkvl_qqBk"  # An age-restricted video
+        tmp_cookies = "/tmp/cookies.txt"
+        shutil.copyfile(cookies_path, tmp_cookies)
+
+        test_url = "https://youtu.be/nddkvl_qqBk"
         ydl_opts = {
             'quiet': True,
             'skip_download': True,
-            'cookiefile': cookies_path,
-            'no_write_cookie_file': True
+            'cookiefile': tmp_cookies,
+            'no_write_cookie_file': False
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(test_url, download=False)
@@ -237,11 +241,23 @@ class DownloadTask:
         if os.path.exists(self.filename):
             os.remove(self.filename)
 
+        # Handle cookies: Copy to tmp if available
+        if cookies_available:
+            self.tmp_cookie_path = f"/tmp/cookies_{self.video_id}.txt"
+            shutil.copyfile(COOKIES_FILE, self.tmp_cookie_path)
+            cookie_opts = {
+                'cookiefile': self.tmp_cookie_path,
+                'no_write_cookie_file': False
+            }
+        else:
+            cookie_opts = {}
+
         info_ydl_opts = {
             'quiet': True,
             'skip_download': True,
-            **({'cookiefile': COOKIES_FILE, 'no_write_cookie_file': True} if cookies_available else {})
+            **cookie_opts
         }
+
         with yt_dlp.YoutubeDL(info_ydl_opts) as ydl:
             try:
                 info = ydl.extract_info(self.url, download=False)
@@ -267,9 +283,8 @@ class DownloadTask:
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True,
-            **({'cookiefile': COOKIES_FILE, 'no_write_cookie_file': True} if cookies_available else {})
+            **cookie_opts
         }
-
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([self.url])
@@ -364,6 +379,7 @@ class DownloadTask:
         return paths, temp_dir
 
     async def cleanup(self):
+        # Clean up video parts and main file
         for file in self.temp_files + [self.filename]:
             if os.path.exists(file):
                 try:
@@ -371,6 +387,8 @@ class DownloadTask:
                     log.info(f"[CLEANUP] Removed file: {file}")
                 except Exception as e:
                     log.warning(f"[CLEANUP] Could not remove {file}: {e}")
+        
+        # Clean up temporary split directories
         for d in self.temp_dirs:
             if os.path.exists(d):
                 try:
@@ -378,6 +396,14 @@ class DownloadTask:
                     log.info(f"[CLEANUP] Removed directory: {d}")
                 except Exception as e:
                     log.warning(f"[CLEANUP] Could not remove {d}: {e}")
+        
+        # Clean up temp cookie file
+        if hasattr(self, 'tmp_cookie_path') and os.path.exists(self.tmp_cookie_path):
+            try:
+                os.remove(self.tmp_cookie_path)
+                log.info(f"[CLEANUP] Removed temp cookie file: {self.tmp_cookie_path}")
+            except Exception as e:
+                log.warning(f"[CLEANUP] Could not remove temp cookie file: {e}")
 
 # --- Telegram Handlers ---
 async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
