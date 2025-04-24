@@ -415,10 +415,44 @@ async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("🔍 Checking cookies...")
 
     result = init_cookies()
+
+    # --- Expiry info ---
+    expiry_info = "❓ Unable to determine expiry."
+    try:
+        max_expiry = 0
+        with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 5:
+                    try:
+                        expiry = int(parts[4])
+                        if expiry > max_expiry:
+                            max_expiry = expiry
+                    except ValueError:
+                        continue
+
+        if max_expiry > 0:
+            expiry_dt = datetime.utcfromtimestamp(max_expiry)
+            time_left = expiry_dt - datetime.utcnow()
+            if time_left.total_seconds() > 0:
+                human_readable = str(time_left).split('.')[0]
+                expiry_info = f"🕒 Expires in: {human_readable} (UTC: {expiry_dt.strftime('%Y-%m-%d %H:%M:%S')})"
+                log.info(f"[COOKIES] Cookie expiry: {human_readable} remaining (UTC: {expiry_dt})")
+            else:
+                expiry_info = "⚠️ Cookies already expired."
+                log.warning("[COOKIES] Cookie expiry date has passed.")
+        else:
+            log.warning("[COOKIES] No expiry timestamps found in cookies.txt")
+    except Exception as e:
+        log.error(f"[COOKIES] Failed to parse expiry info: {e}", exc_info=True)
+
     if result:
-        await update.message.reply_text("✅ Cookies are valid and working.")
+        await update.message.reply_text(f"✅ Cookies are valid and working.\n{expiry_info}")
     else:
-        await update.message.reply_text("❌ Cookies are missing or invalid.")
+        await update.message.reply_text(f"❌ Cookies are missing or invalid.\n{expiry_info}")
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[COMMAND] /id from user {update.effective_user.id} in chat {update.effective_chat.id}")
