@@ -6,7 +6,6 @@ import asyncio
 import logging
 import tempfile
 import subprocess
-import shutil
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
