@@ -76,18 +76,16 @@ def init_cookies(cookies_path: str = COOKIES_FILE) -> bool:
         return False
 
     try:
-        tmp_cookies = "/tmp/cookies.txt"
-        shutil.copyfile(cookies_path, tmp_cookies)
-
         test_url = "https://youtu.be/nddkvl_qqBk"
         ydl_opts = {
             'quiet': True,
             'skip_download': True,
-            'cookiefile': tmp_cookies,
+            'cookiefile': cookies_path,
             'no_write_cookie_file': False
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(test_url, download=False)
+
         log.info("[COOKIES] Cookies are valid ✅")
         return True
     except DownloadError as e:
@@ -96,6 +94,7 @@ def init_cookies(cookies_path: str = COOKIES_FILE) -> bool:
         log.error(f"[COOKIES] Failed to validate cookies: {e}", exc_info=True)
 
     return False
+
 
 cookies_available = init_cookies()
 
@@ -243,10 +242,8 @@ class DownloadTask:
 
         # Handle cookies: Copy to tmp if available
         if cookies_available:
-            self.tmp_cookie_path = f"/tmp/cookies_{self.video_id}.txt"
-            shutil.copyfile(COOKIES_FILE, self.tmp_cookie_path)
             cookie_opts = {
-                'cookiefile': self.tmp_cookie_path,
+                'cookiefile': COOKIES_FILE,
                 'no_write_cookie_file': False
             }
         else:
@@ -396,14 +393,6 @@ class DownloadTask:
                     log.info(f"[CLEANUP] Removed directory: {d}")
                 except Exception as e:
                     log.warning(f"[CLEANUP] Could not remove {d}: {e}")
-        
-        # Clean up temp cookie file
-        if hasattr(self, 'tmp_cookie_path') and os.path.exists(self.tmp_cookie_path):
-            try:
-                os.remove(self.tmp_cookie_path)
-                log.info(f"[CLEANUP] Removed temp cookie file: {self.tmp_cookie_path}")
-            except Exception as e:
-                log.warning(f"[CLEANUP] Could not remove temp cookie file: {e}")
 
 # --- Telegram Handlers ---
 async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
