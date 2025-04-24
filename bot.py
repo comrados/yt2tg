@@ -416,50 +416,67 @@ async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     result = init_cookies()
 
-    # --- Expiry info ---
-    expiry_info = "❓ Unable to determine expiry."
+    # --- Expiry info for important cookies only ---
+    important_cookies = {
+        "LOGIN_INFO", "SAPISID", "HSID", "SSID",
+        "__Secure-3PAPISID", "__Secure-3PSID", "__Secure-3PSIDCC"
+    }
+
+    expiry_info = "❓ Unable to determine expiry of important cookies."
     try:
-        max_expiry = 0
+        soonest_expiry = float("inf")
+        soonest_name = None
+
         with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
                 parts = line.split()
-                if len(parts) >= 5:
-                    try:
-                        expiry = int(parts[4])
-                        if expiry > max_expiry:
-                            max_expiry = expiry
-                    except ValueError:
-                        continue
+                if len(parts) >= 6:
+                    name = parts[5]
+                    if name in important_cookies:
+                        try:
+                            expiry = int(parts[4])
+                            if expiry < soonest_expiry:
+                                soonest_expiry = expiry
+                                soonest_name = name
+                        except ValueError:
+                            continue
 
-        if max_expiry > 0:
-            expiry_dt = datetime.utcfromtimestamp(max_expiry)
+        if soonest_expiry != float("inf"):
+            expiry_dt = datetime.utcfromtimestamp(soonest_expiry)
             time_left = expiry_dt - datetime.utcnow()
             if time_left.total_seconds() > 0:
                 human_readable = str(time_left).split('.')[0]
-                expiry_info = f"🕒 Expires in: {human_readable} (UTC: {expiry_dt.strftime('%Y-%m-%d %H:%M:%S')})"
-                log.info(f"[COOKIES] Cookie expiry: {human_readable} remaining (UTC: {expiry_dt})")
+                expiry_info = (
+                    f"🕒 Soonest important cookie expiry:\n"
+                    f"• `{soonest_name}` expires in: {human_readable}\n"
+                    f"(UTC: {expiry_dt.strftime('%Y-%m-%d %H:%M:%S')})\n\n"
+                    f"✅ Other cookies may still work after this, "
+                    f"but age-restricted content might fail."
+                )
+                log.info(f"[COOKIES] Soonest important cookie '{soonest_name}' expires in {human_readable} (UTC: {expiry_dt})")
             else:
-                expiry_info = "⚠️ Cookies already expired."
-                log.warning("[COOKIES] Cookie expiry date has passed.")
+                expiry_info = f"⚠️ Important cookie `{soonest_name}` already expired.\nBot may fail on age-restricted videos."
+                log.warning(f"[COOKIES] Important cookie '{soonest_name}' expired at {expiry_dt} UTC")
         else:
-            log.warning("[COOKIES] No expiry timestamps found in cookies.txt")
+            expiry_info = "⚠️ No important auth cookies found in cookies.txt."
+            log.warning("[COOKIES] No important cookies like LOGIN_INFO or SAPISID found")
     except Exception as e:
-        log.error(f"[COOKIES] Failed to parse expiry info: {e}", exc_info=True)
+        log.error(f"[COOKIES] Failed to parse cookie expiry: {e}", exc_info=True)
 
     final_msg = (
-        f"✅ Cookies are valid and working.\n{expiry_info}"
+        f"✅ Cookies are valid and working.\n\n{expiry_info}"
         if result else
-        f"❌ Cookies are missing or invalid.\n{expiry_info}"
+        f"❌ Cookies are missing or invalid.\n\n{expiry_info}"
     )
 
     try:
-        await status_msg.edit_text(final_msg)
+        await status_msg.edit_text(final_msg, parse_mode='Markdown')
     except Exception as e:
         log.warning(f"[EDIT_FAIL] Could not edit cookie status message: {e}")
-        await update.message.reply_text(final_msg)
+        await update.message.reply_text(final_msg, parse_mode='Markdown')
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[COMMAND] /id from user {update.effective_user.id} in chat {update.effective_chat.id}")
