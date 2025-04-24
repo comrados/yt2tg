@@ -80,6 +80,7 @@ def init_cookies(cookies_path: str = COOKIES_FILE) -> bool:
             'quiet': True,
             'skip_download': True,
             'cookiefile': cookies_path,
+            'no_write_cookie_file': True
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(test_url, download=False)
@@ -239,7 +240,7 @@ class DownloadTask:
         info_ydl_opts = {
             'quiet': True,
             'skip_download': True,
-            **({'cookiefile': COOKIES_FILE} if cookies_available else {})
+            **({'cookiefile': COOKIES_FILE, 'no_write_cookie_file': True} if cookies_available else {})
         }
         with yt_dlp.YoutubeDL(info_ydl_opts) as ydl:
             try:
@@ -266,7 +267,7 @@ class DownloadTask:
             'quiet': True,
             'noplaylist': True,
             'no_warnings': True,
-            **({'cookiefile': COOKIES_FILE} if cookies_available else {})
+            **({'cookiefile': COOKIES_FILE, 'no_write_cookie_file': True} if cookies_available else {})
         }
 
 
@@ -379,6 +380,20 @@ class DownloadTask:
                     log.warning(f"[CLEANUP] Could not remove {d}: {e}")
 
 # --- Telegram Handlers ---
+async def check_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        log.warning(f"[BLOCKED] Unauthorized user {user_id} tried /checkcookies")
+        return
+
+    await update.message.reply_text("🔍 Checking cookies...")
+
+    result = init_cookies()
+    if result:
+        await update.message.reply_text("✅ Cookies are valid and working.")
+    else:
+        await update.message.reply_text("❌ Cookies are missing or invalid.")
+
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[COMMAND] /id from user {update.effective_user.id} in chat {update.effective_chat.id}")
     await update.message.reply_text(f"👤 User ID: `{update.effective_user.id}`\n💬 Chat ID: `{update.effective_chat.id}`", parse_mode='Markdown')
@@ -568,6 +583,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("download", download_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
+    app.add_handler(CommandHandler("checkcookies", check_cookies_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_logger))
 
