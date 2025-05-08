@@ -298,6 +298,7 @@ class DownloadTask:
         if size_mb > 50:
             await self._safe_edit_status(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...")
             paths, temp_dir = self.split_video(self.filename)
+            await asyncio.sleep(2)  # Allow OS to flush writes from FFmpeg
             self.temp_dirs.append(temp_dir)
             self.temp_files.extend(paths)
 
@@ -340,8 +341,9 @@ class DownloadTask:
                     await asyncio.sleep(wait_time)
                     f.seek(0)
                 except Exception as e:
-                    log.error(f"[ERROR] Failed to send file '{file_name}': {e}")
-                    return False
+                    log.warning(f"[RETRY] Exception on attempt {attempt}/{max_retries} for file '{file_name}': {e}")
+                    await asyncio.sleep(5)  # Wait before retrying
+                    f.seek(0)  # Reset file pointer for resend
             log.error(f"[FAIL] Giving up after {max_retries} retries for file '{file_name}'")
             return False
 
