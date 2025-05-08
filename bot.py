@@ -270,7 +270,6 @@ class DownloadTask:
 
         title = info.get("title", "Untitled")
         log.info(f"[SEND] Sending video titled: {title}")
-        safe_title = escape_markdown(title, version=2)
 
         await self._safe_edit_status("⏬ Downloading video (360p)...")
         ydl_opts = {
@@ -305,7 +304,8 @@ class DownloadTask:
             self.temp_files.extend(paths)
 
             for idx, part in enumerate(paths, 1):
-                caption = f"🎬 *{safe_title}* ({idx}/{len(paths)})"
+                raw_caption = f"🎬 {title} ({idx}/{len(paths)})"
+                caption = escape_markdown(raw_caption, version=2)
                 await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
                 success, msg_id = await self._send_video_with_retry(target_chat_id, part, caption)
                 if success:
@@ -314,7 +314,8 @@ class DownloadTask:
                 else:
                     raise Exception(f"Failed to send part {idx}/{len(paths)}")
         else:
-            caption = f"🎬 *{safe_title}*"
+            raw_caption = f"🎬 {title}"
+            caption = escape_markdown(raw_caption, version=2)
             success, msg_id = await self._send_video_with_retry(target_chat_id, self.filename, caption)
             if not success:
                 raise Exception("Failed to send the video.")
