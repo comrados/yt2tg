@@ -14,7 +14,7 @@ import sqlite3
 from contextlib import closing
 
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, TimedOut
 from yt_dlp.utils import DownloadError
 from telegram.helpers import escape_markdown
 from telegram.ext import (
@@ -295,6 +295,8 @@ class DownloadTask:
         size_mb = os.path.getsize(self.filename) / (1024 * 1024)
         target_chat_id = self.update.effective_chat.id if self.update.effective_chat.type == "private" else int(TARGET_CHANNEL)
 
+        self.sent_parts = {}  # part_index -> message_id
+
         if size_mb > 50:
             await self._safe_edit_status(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...")
             paths, temp_dir = self.split_video(self.filename)
@@ -303,14 +305,17 @@ class DownloadTask:
             self.temp_files.extend(paths)
 
             for idx, part in enumerate(paths, 1):
+                caption = f"🎬 *{safe_title}* ({idx}/{len(paths)})"
                 await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
-                caption = f"🎬 *{safe_title}* \\({idx}/{len(paths)}\\)"
-                success = await self._send_video_with_retry(target_chat_id, part, caption)
-                if not success:
+                success, msg_id = await self._send_video_with_retry(target_chat_id, part, caption)
+                if success:
+                    self.sent_parts[idx] = msg_id
+                    await self._safe_edit_status(f"✅ Sent part {idx}/{len(paths)}")
+                else:
                     raise Exception(f"Failed to send part {idx}/{len(paths)}")
         else:
             caption = f"🎬 *{safe_title}*"
-            success = await self._send_video_with_retry(target_chat_id, self.filename, caption)
+            success, msg_id = await self._send_video_with_retry(target_chat_id, self.filename, caption)
             if not success:
                 raise Exception("Failed to send the video.")
 
@@ -319,33 +324,42 @@ class DownloadTask:
             mark_as_processed(self.update.effective_chat.id, self.video_id, self.update.effective_message.message_id, "success")
             await self._safe_edit_status("✅ Sent to Telegram")
 
-    async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str) -> bool:
+    async def _send_video_with_retry(self, chat_id: int, file_path: str, caption: str) -> tuple[bool, Optional[int]]:
         max_retries = 5
         file_name = os.path.basename(file_path)
 
         with open(file_path, 'rb') as f:
             for attempt in range(1, max_retries + 1):
                 try:
-                    await self.context.bot.send_video(
+                    msg = await self.context.bot.send_video(
                         chat_id=chat_id,
                         video=f,
                         caption=caption,
                         parse_mode='MarkdownV2',
-                        supports_streaming=True
+                        supports_streaming=True,
+                        disable_notification=True
                     )
                     log.info(f"[SEND] Sent file '{file_name}' to chat {chat_id}")
-                    return True
+                    return True, msg.message_id
+
                 except RetryAfter as e:
                     wait_time = int(e.retry_after) + 1
                     log.warning(f"[RETRY] Flood control. Waiting {wait_time}s (attempt {attempt}/{max_retries}) for file '{file_name}'...")
                     await asyncio.sleep(wait_time)
                     f.seek(0)
+
+                except TimedOut as e:
+                    log.warning(f"[RETRY] TimedOut on attempt {attempt}/{max_retries} for '{file_name}': {e}")
+                    await asyncio.sleep(10)
+                    f.seek(0)
+
                 except Exception as e:
-                    log.warning(f"[RETRY] Exception on attempt {attempt}/{max_retries} for file '{file_name}': {e}")
-                    await asyncio.sleep(5)  # Wait before retrying
-                    f.seek(0)  # Reset file pointer for resend
+                    log.warning(f"[RETRY] Exception on attempt {attempt}/{max_retries} for '{file_name}': {e}")
+                    await asyncio.sleep(5)
+                    f.seek(0)
+
             log.error(f"[FAIL] Giving up after {max_retries} retries for file '{file_name}'")
-            return False
+            return False, None
 
     async def _safe_edit_status(self, text: str):
         try:
