@@ -233,8 +233,6 @@ class DownloadTask:
             if self in running_tasks:
                 running_tasks.discard(self)
 
-
-
     async def _process(self):
         if os.path.exists(self.filename):
             os.remove(self.filename)
@@ -663,6 +661,9 @@ if __name__ == "__main__":
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(start_worker)
+        .connect_timeout(10)  # Timeout for establishing a connection (seconds)
+        .read_timeout(60)     # Timeout for reading data from the server (seconds)
+        .write_timeout(60)    # Timeout for writing data to the server (seconds)
         .build()
     )
 
