@@ -292,8 +292,6 @@ class DownloadTask:
         size_mb = os.path.getsize(self.filename) / (1024 * 1024)
         target_chat_id = self.update.effective_chat.id if self.update.effective_chat.type == "private" else int(TARGET_CHANNEL)
 
-        self.sent_parts = {}  # part_index -> message_id
-
         if size_mb > 50:
             await self._safe_edit_status(f"📦 Downloaded ({size_mb:.1f} MB). Splitting...")
             paths, temp_dir = self.split_video(self.filename)
@@ -307,7 +305,6 @@ class DownloadTask:
                 await self._safe_edit_status(f"📤 Sending part {idx}/{len(paths)}...")
                 success, msg_id = await self._send_video_with_retry(target_chat_id, part, caption)
                 if success:
-                    self.sent_parts[idx] = msg_id
                     await self._safe_edit_status(f"✅ Sent part {idx}/{len(paths)}")
                 else:
                     raise Exception(f"Failed to send part {idx}/{len(paths)}")
