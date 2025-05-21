@@ -19,8 +19,8 @@ if __name__ == "__main__":
         .token(BOT_TOKEN)
         .post_init(start_worker)
         .connect_timeout(10)  # seconds
-        .read_timeout(60)
-        .write_timeout(60)
+        .read_timeout(300)
+        .write_timeout(300)
         .build()
     )
 

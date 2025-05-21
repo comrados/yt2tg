@@ -15,13 +15,15 @@ from telegram.error import RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+from .task import Task
 from ..utils.logging_utils import log
 from ..utils.cookies_utils import cookies_available, COOKIES_FILE
 from ..utils.utils import get_video_id
 from ..utils.config_utils import TARGET_CHANNEL
 from ..utils.db_utils import mark_as_processed
 
-class DownloadTask:
+
+class DownloadTask(Task):
     """
     Represents a single video-download-and-send job.
     """
@@ -30,8 +32,8 @@ class DownloadTask:
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-        url: str,
         status_msg: Message,
+        url: str,
         original_message_id: int
     ) -> None:
         """
@@ -43,6 +45,7 @@ class DownloadTask:
         :param status_msg: Message object to edit status updates.
         :param original_message_id: ID of the triggering message.
         """
+        super().__init__(update, context, status_msg)
         self.update: Update = update
         self.context: ContextTypes.DEFAULT_TYPE = context
         self.url: str = url

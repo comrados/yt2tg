@@ -12,3 +12,4 @@ config.json
 project_dump.txt
 
 .venv/
+.vscode/

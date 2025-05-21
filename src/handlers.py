@@ -7,6 +7,7 @@ import asyncio
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import ContextTypes, Application
 
+from .tasks.task import Task
 from .tasks.download_task import DownloadTask
 from .utils.logging_utils import log
 from .utils.config_utils import ALLOWED_USERS, TARGET_CHANNEL
@@ -18,13 +19,13 @@ from .utils.utils import clean_youtube_url, parse_log_time, get_video_id
 init_db()
 
 # In-memory queues & active tasks
-task_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
-running_tasks: set[DownloadTask] = set()
+task_queue: asyncio.Queue[Task] = asyncio.Queue()
+running_tasks: set[Task] = set()
 
 def is_allowed(update: Update) -> bool:
     """
     Check whether the user and chat are permitted.
-
+    
     :param update: Telegram Update object.
     :return: True if user in ALLOWED_USERS and chat is the user or the target channel.
     """
@@ -35,13 +36,16 @@ def is_allowed(update: Update) -> bool:
 def is_task_queued_or_running(chat_id: int, video_id: str) -> bool:
     """
     Determine if a given video task is already queued or actively running.
-
+    
     :param chat_id: Telegram chat ID.
     :param video_id: YouTube video ID.
     :return: True if found in running_tasks or task_queue.
     """
+    # We need to check if the task is a DownloadTask before accessing video_id
     return any(
-        t.video_id == video_id and t.update.effective_chat.id == chat_id
+        isinstance(t, DownloadTask) and 
+        t.video_id == video_id and 
+        t.update.effective_chat.id == chat_id
         for t in running_tasks.union({item for item in task_queue._queue})
     )
 
@@ -191,7 +195,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     status_msg = await message.reply_text("✅ Queued...", parse_mode="Markdown")
     mark_as_processed(cid, vid, message.message_id, "processing")
 
-    task = DownloadTask(update, context, url, status_msg, message.message_id)
+    task = DownloadTask(update, context, status_msg, url, message.message_id)
     running_tasks.add(task)
     await task_queue.put(task)
 
@@ -284,7 +288,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         log.info(f"[RETRY] User {uid} retry {vid}")
         await query.edit_message_text("🔁 Re-downloading...")
         mark_as_processed(cid, vid, query.message.message_id, "processing")
-        task = DownloadTask(update, context, url, query.message, query.message.message_id)
+        task = DownloadTask(update, context, query.message, url, query.message.message_id)
         running_tasks.add(task)
         await task_queue.put(task)
     else:
