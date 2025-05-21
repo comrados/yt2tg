@@ -19,13 +19,23 @@ A Telegram bot that downloads YouTube videos and forwards them to a specified Te
 
 ```
 .
-├── bot.py               # Main bot application code
-├── config.json          # Configuration (bot token, allowed users, target channel)
-├── Dockerfile           # Docker container definition
-├── docker-compose.yml   # Docker Compose configuration
-├── requirements.txt     # Python dependencies
-├── data/                # Directory for persistent data (SQLite database)
-└── logs/                # Directory for log files
+├── src/
+│   ├── bot.py                   # main entry point
+│   ├── handlers.py              # all Telegram handlers
+│   ├── tasks/
+│   │   └── download_task.py     # download-and-send task logic
+│   └── utils/
+│       ├── logging_utils.py     # logging setup
+│       ├── db_utils.py          # SQLite database helpers
+│       ├── config_utils.py      # loads config.json
+│       ├── cookies_utils.py     # YouTube cookies validation
+│       └── utils.py             # misc helpers (URL parsing, log timestamps)
+├── config.json                  # bot token, allowed users, target channel
+├── Dockerfile                   # container definition
+├── docker-compose.yml           # compose configuration
+├── requirements.txt             # Python dependencies
+├── data/                        # persistent SQLite database
+└── logs/                        # persistent log files
 ```
 
 ## Prerequisites

@@ -10,3 +10,5 @@ logs/
 cookies.txt
 config.json
 project_dump.txt
+
+.venv/
