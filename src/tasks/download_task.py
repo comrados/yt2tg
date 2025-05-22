@@ -113,7 +113,10 @@ class DownloadTask(Task):
 
         # download file
         ydl_opts = {
-            'format': 'bestvideo[height<=360]+bestaudio/b[ext=mp4]/best',
+            # 1) 360p video + best audio
+            # 2) else best video + best audio
+            'format': 'bestvideo[height<=360]+bestaudio/bestvideo+bestaudio',
+            'merge_output_format': 'mp4',
             'outtmpl': self.filename,
             'quiet': True,
             'noplaylist': True,
