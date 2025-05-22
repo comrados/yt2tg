@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 
 from .task import Task
 from ..utils.config_utils import GEMINI_API_KEY, CHOSEN_MODEL_NAME
+from ..utils.cookies_utils import COOKIES_FILE
 from ..utils.logging_utils import log
 from ..utils.db_utils import mark_transcript_processed
 from ..utils.utils import get_video_id
@@ -107,7 +108,8 @@ class TranscriptTask(Task):
 
     async def _process(self) -> None:
         # 1) fetch raw transcript
-        segs = YouTubeTranscriptApi.get_transcript(self.video_id)
+        ytt_api = YouTubeTranscriptApi(cookie_path=COOKIES_FILE)
+        segs = ytt_api.get_transcript(self.video_id)
         raw_script = "\n".join(seg["text"] for seg in segs)
 
         await self.status_msg.edit_text("⏳ Cleaning and structuring…")
