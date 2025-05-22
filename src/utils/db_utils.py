@@ -2,6 +2,7 @@ import os
 import sqlite3
 from contextlib import closing
 import logging
+from typing import Optional
 
 DB_PATH: str = "data/bot.db"
 
@@ -30,7 +31,14 @@ def init_db(db_path: str = DB_PATH) -> None:
                 video_id   TEXT,
                 message_id INTEGER,
                 status     TEXT,
-                PRIMARY KEY (chat_id, video_id)
+                transcript_lang TEXT,
+                PRIMARY KEY (chat_id, video_id, transcript_lang)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id        INTEGER PRIMARY KEY,
+                preferred_language TEXT
             )
         """)
         conn.commit()
@@ -79,35 +87,54 @@ def mark_as_processed(
         conn.commit()
     logging.info(f"[DB] Marked video {video_id} in chat {chat_id} as '{status}'")
 
+def set_user_language_preference(user_id: int, language: str, db_path: str = DB_PATH) -> None:
+    """Set user's preferred language for transcripts."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO user_preferences (user_id, preferred_language) VALUES (?, ?)",
+            (user_id, language)
+        )
+        conn.commit()
+    logging.info(f"[DB] Set language preference for user {user_id}: {language}")
+
+def get_user_language_preference(user_id: int, db_path: str = DB_PATH) -> Optional[str]:
+    """Get user's preferred language, return None if not set."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT preferred_language FROM user_preferences WHERE user_id = ?",
+            (user_id,)
+        )
+        result = c.fetchone()
+        return result[0] if result else None
+
 def mark_transcript_processed(
     chat_id: int,
     video_id: str,
     message_id: int,
     status: str,
+    transcript_lang: str = "en",
     db_path: str = DB_PATH
 ) -> None:
-    """
-    Insert or update the processing status of a transcript in the database.
-    """
+    """Insert or update the processing status of a transcript in the database."""
     with closing(sqlite3.connect(db_path)) as conn:
         c = conn.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO processed_transcripts (chat_id, video_id, message_id, status) VALUES (?, ?, ?, ?)",
-            (chat_id, video_id, message_id, status)
+            "INSERT OR REPLACE INTO processed_transcripts (chat_id, video_id, message_id, status, transcript_lang) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, video_id, message_id, status, transcript_lang)
         )
         conn.commit()
-    logging.info(f"[DB] Marked transcript {video_id} in chat {chat_id} as '{status}'")
+    logging.info(f"[DB] Marked transcript {video_id} in chat {chat_id} as '{status}' (lang: {transcript_lang})")
 
-def is_transcript_processed(chat_id: int, video_id: str, db_path: str = DB_PATH) -> bool:
-    """
-    Check whether a given transcript in a chat has already been processed successfully.
-    """
+def is_transcript_processed(chat_id: int, video_id: str, transcript_lang: str = "en", db_path: str = DB_PATH) -> bool:
+    """Check whether a transcript has been processed for specific language."""
     with closing(sqlite3.connect(db_path)) as conn:
         c = conn.cursor()
         c.execute(
-            "SELECT status FROM processed_transcripts WHERE chat_id = ? AND video_id = ?",
-            (chat_id, video_id)
+            "SELECT status FROM processed_transcripts WHERE chat_id = ? AND video_id = ? AND transcript_lang = ?",
+            (chat_id, video_id, transcript_lang)
         )
         result = c.fetchone()
-        logging.info(f"[DB] Checked if transcript {video_id} in chat {chat_id} is already processed: {result}")
+        logging.info(f"[DB] Checked if transcript {video_id} in chat {chat_id} (lang: {transcript_lang}) is processed: {result}")
         return bool(result and result[0] == "success")

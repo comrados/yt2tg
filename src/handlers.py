@@ -13,9 +13,18 @@ from .tasks.transcript_task import TranscriptTask
 
 from .utils.logging_utils import log
 from .utils.config_utils import ALLOWED_USERS, TARGET_CHANNEL
-from .utils.db_utils import init_db, mark_as_processed, is_transcript_processed, mark_transcript_processed
+from .utils.db_utils import (
+    init_db, mark_as_processed, is_transcript_processed, 
+    mark_transcript_processed, get_user_language_preference, 
+    set_user_language_preference
+)
+from .utils.language_utils import (
+    get_language_name, normalize_language, is_valid_language,
+    get_popular_languages, get_language_suggestions
+)
 from .utils.cookies_utils import cookies_available, COOKIES_FILE
 from .utils.utils import clean_youtube_url, parse_log_time, get_video_id
+
 
 # Initialize DB on import
 init_db()
@@ -201,21 +210,111 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     running_tasks.add(task)
     await task_queue.put(task)
 
+async def setlang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for /setlang: set user's preferred transcript language."""
+    uid = update.effective_user.id
+    if uid not in ALLOWED_USERS:
+        log.warning(f"[BLOCKED] Unauthorized user {uid} tried /setlang")
+        return
+
+    if not context.args:
+        # Show current preference and available languages
+        current_pref = get_user_language_preference(uid)
+        current_display = get_language_name(current_pref) if current_pref else "Not set"
+        
+        popular = get_popular_languages()
+        lang_list = ", ".join([f"{name} ({code})" for code, name in popular[:12]])
+        
+        await update.message.reply_text(
+            f"🌐 **Current language preference:** {current_display}\n\n"
+            f"**Popular languages:** {lang_list}\n\n"
+            f"**Usage:** `/setlang <language>`\n"
+            f"You can use either language name or language code.\n\n"
+            f"**Examples:**\n"
+            f"• `/setlang english`\n"
+            f"• `/setlang en`\n"
+            f"• `/setlang russian`\n"
+            f"• `/setlang ru`",
+            parse_mode='Markdown'
+        )
+        return
+
+    lang_input = " ".join(context.args).strip()
+    
+    # Try to normalize the language first
+    lang_code, lang_name = normalize_language(lang_input)
+    
+    if not lang_code:  # Only check this after normalize_language
+        # Try to provide suggestions
+        suggestions = get_language_suggestions(lang_input, 5)
+        suggestion_text = ""
+        if suggestions:
+            suggestion_text = "\n\n**Did you mean:**\n" + "\n".join([
+                f"• {name} (`{code}`)" for code, name in suggestions
+            ])
+        
+        await update.message.reply_text(
+            f"❌ Unknown language: **{lang_input}**\n"
+            f"Use `/setlang` without arguments to see available languages.{suggestion_text}",
+            parse_mode='Markdown'
+        )
+        return
+    
+    set_user_language_preference(uid, lang_code)
+    
+    await update.message.reply_text(
+        f"✅ Language preference set to: **{lang_name}** (`{lang_code}`)\n\n"
+        f"Now you can use `/transcript` to get transcripts in {lang_name}.",
+        parse_mode='Markdown'
+    )
+
+async def getlang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from .utils.db_utils import get_user_language_preference
+    uid = update.effective_user.id
+    pref = get_user_language_preference(uid)
+    if pref:
+        await update.message.reply_text(f"🌐 Current preference: `{pref}` ({get_language_name(pref)})", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("❌ No language preference set.", parse_mode='Markdown')
+
 async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handler for /transcript: enqueue or retry a transcript task.
-    """
+    """Handler for /transcript: enqueue or retry a transcript task."""
     msg = update.message or update.channel_post
     uid = update.effective_user.id
     cid = update.effective_chat.id
     log.info(f"[COMMAND] /transcript from user {uid} in chat {cid}")
 
-    if uid not in ALLOWED_USERS: # For transcript, user authorization is enough
+    if uid not in ALLOWED_USERS:
         log.warning(f"[BLOCKED] Unauthorized user {uid} for /transcript")
         return await msg.reply_text("🚫 Not authorized.")
 
+    # Check if user has set preferred language
+    user_lang_pref = get_user_language_preference(uid)
+    if not user_lang_pref:
+        popular = get_popular_languages()
+        lang_examples = ", ".join([name for _, name in popular[:5]])
+        await msg.reply_text(
+            f"🌐 **Please set your preferred language first!**\n\n"
+            f"Use: `/setlang <language>`\n\n"
+            f"**Examples:**\n"
+            f"• `/setlang english`\n"
+            f"• `/setlang spanish`\n"
+            f"• `/setlang russian`\n\n"
+            f"**Popular languages:** {lang_examples}\n\n"
+            f"After setting language, run `/transcript <youtube_url>` again.",
+            parse_mode='Markdown'
+        )
+        return
+
     if not context.args:
-        return await msg.reply_text("📎 Please provide a YouTube link.")
+        lang_name = get_language_name(user_lang_pref)
+        return await msg.reply_text(
+            f"📎 **Please provide a YouTube link.**\n\n"
+            f"**Usage:** `/transcript <youtube_url>`\n"
+            f"Current language: **{lang_name}** (`{user_lang_pref}`)\n\n"
+            f"Change language with `/setlang <language>`",
+            parse_mode='Markdown'
+        )
 
     url = clean_youtube_url(context.args[0])
     if not url:
@@ -225,44 +324,44 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not vid:
         return await msg.reply_text("❌ Could not extract video ID.")
 
-    # DB status check (using the simpler is_transcript_processed from before language feature)
-    # This will need db_utils.is_transcript_processed to be reverted too if it was changed to return a tuple
-    with closing(sqlite3.connect(os.getenv('DB_PATH', 'data/bot.db'))) as conn:
-        c = conn.cursor()
-        c.execute(
-            "SELECT status FROM processed_transcripts WHERE chat_id = ? AND video_id = ?",
-            (cid, vid)
-        )
-        row = c.fetchone()
-        status = row[0] if row else None
-
-    if status == "success": # Simple check for success
+    # Check if transcript already processed for this language
+    if is_transcript_processed(cid, vid, user_lang_pref):
+        lang_name = get_language_name(user_lang_pref)
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔁 Retry Transcript", callback_data=f"retry_transcript|{vid}|{url}"),
+            InlineKeyboardButton("🔁 Retry Transcript", callback_data=f"retry_transcript|{vid}|{url}|{user_lang_pref}"),
             InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_transcript|{vid}")
         ]])
         return await msg.reply_text(
-            "✅ Transcript was already generated.\nRetry?",
-            reply_markup=keyboard
+            f"✅ Transcript in **{lang_name}** was already generated.\n\nRetry?",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
         )
     
-    # Check if it's currently processing (simplified, might need a proper check like for downloads)
+    # Check if currently processing
     is_already_running_or_queued = any(
         isinstance(t, TranscriptTask) and 
         t.video_id == vid and 
-        t.update.effective_chat.id == cid
+        t.update.effective_chat.id == cid and
+        t.target_lang_code == user_lang_pref
         for t in running_tasks.union({item for item in task_queue._queue})
     )
-    if status == "processing" and is_already_running_or_queued:
-        await msg.reply_text("⏳ This transcript is currently being processed.", parse_mode="Markdown")
+    if is_already_running_or_queued:
+        lang_name = get_language_name(user_lang_pref)
+        await msg.reply_text(
+            f"⏳ This transcript in **{lang_name}** is currently being processed.", 
+            parse_mode="Markdown"
+        )
         return
 
-    status_msg = await msg.reply_text("✅ Queued transcript task…")
-    mark_transcript_processed(cid, vid, status_msg.message_id, "processing") # transcript_lang not passed
-    task = TranscriptTask(update, context, status_msg, url) # target_lang_code not passed
+    lang_name = get_language_name(user_lang_pref)
+    status_msg = await msg.reply_text(
+        f"✅ Queued transcript task for **{lang_name}**…", 
+        parse_mode='Markdown'
+    )
+    mark_transcript_processed(cid, vid, status_msg.message_id, "processing", user_lang_pref)
+    task = TranscriptTask(update, context, status_msg, url, user_lang_pref)
     running_tasks.add(task)
     await task_queue.put(task)
-
 
 async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -349,12 +448,7 @@ async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle inline-button callbacks for retry/cancel.
-
-    :param update: Telegram Update.
-    :param context: Callback context.
-    """
+    """Handle inline-button callbacks for retry/cancel."""
     query: CallbackQuery = update.callback_query
     await query.answer()
     parts = query.data.split("|")
@@ -375,26 +469,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         task = DownloadTask(update, context, query.message, url, query.message.message_id)
         running_tasks.add(task)
         await task_queue.put(task)
-        return # Explicit return after handling download retry
+        return
 
     if action == "cancel_transcript":
         vid = parts[1] if len(parts) > 1 else "unknown"
         log.info(f"[CANCEL TRANSCRIPT] User {uid} canceled transcript for {vid}")
         return await query.edit_message_text("❌ Transcript canceled")
 
-    if action == "retry_transcript" and len(parts) == 3:
+    if action == "retry_transcript" and len(parts) >= 3:
         vid, url = parts[1], parts[2]
-        log.info(f"[RETRY TRANSCRIPT] User {uid} retry transcript for {vid}")
-        await query.edit_message_text("🔁 Re-queuing transcript…")
-        mark_transcript_processed(cid, vid, query.message.message_id, "processing")
-        task = TranscriptTask(update, context, query.message, url) # No target_lang_code
+        target_lang_code = parts[3] if len(parts) > 3 else get_user_language_preference(uid) or "en"
+        lang_name = get_language_name(target_lang_code)
+        log.info(f"[RETRY TRANSCRIPT] User {uid} retry transcript for {vid} in {lang_name}")
+        await query.edit_message_text(f"🔁 Re-queuing transcript for **{lang_name}**…", parse_mode='Markdown')
+        mark_transcript_processed(cid, vid, query.message.message_id, "processing", target_lang_code)
+        task = TranscriptTask(update, context, query.message, url, target_lang_code)
         running_tasks.add(task)
         await task_queue.put(task)
         return
     
     log.warning(f"[BUTTON_HANDLER] Unhandled action: {query.data}")
     await query.edit_message_text("❌ Invalid or unhandled action.")
-
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """

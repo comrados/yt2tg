@@ -8,7 +8,8 @@ from .utils.config_utils import BOT_TOKEN
 from .handlers import (
     error_handler, id_command, download_command, logs_command,
     tasks_command, check_cookies_command, message_logger,
-    button_handler, start_worker, transcript_command
+    button_handler, start_worker, transcript_command, 
+    setlang_command, getlang_command
 )
 
 # --- Launch ---
@@ -18,7 +19,7 @@ if __name__ == "__main__":
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(start_worker)
-        .connect_timeout(10)  # seconds
+        .connect_timeout(10)
         .read_timeout(300)
         .write_timeout(300)
         .build()
@@ -30,6 +31,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
     app.add_handler(CommandHandler("transcript", transcript_command))
+    app.add_handler(CommandHandler("setlang", setlang_command))
+    app.add_handler(CommandHandler("getlang", getlang_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("checkcookies", check_cookies_command))

@@ -1,4 +1,4 @@
 python-telegram-bot
 yt-dlp
-youtube-transcript-api
 google-genai
+langcodes
