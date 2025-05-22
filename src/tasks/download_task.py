@@ -113,7 +113,7 @@ class DownloadTask(Task):
 
         # download file
         ydl_opts = {
-            'format': 'best[height<=360][ext=mp4][tbr<=600]/best[ext=mp4]/best',
+            'format': 'bestvideo[height<=360]+bestaudio/b[ext=mp4]/best',
             'outtmpl': self.filename,
             'quiet': True,
             'noplaylist': True,
