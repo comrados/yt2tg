@@ -196,43 +196,51 @@ class TranscriptTask(Task):
                                     self.status_msg.message_id, "failed", self.target_lang_code)
 
     async def _download_subtitles(self) -> Optional[str]:
-        """Download subtitles and return path to best matching file."""
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'allsubtitles': True,
-            'subtitlesformat': 'vtt',
-            'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),
-            'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
-        }
+        """Download subtitles in preferred language, fallback to English."""
+        # Try preferred language first, then English
+        for lang in [self.target_lang_code, 'en']:
+            try:
+                # Remove any existing subtitle files
+                for fname in os.listdir(self.temp_dir):
+                    if fname.endswith(('.vtt', '.srt')):
+                        os.remove(os.path.join(self.temp_dir, fname))
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([self.url])
-            
-            # Find all downloaded subtitle files
-            subtitle_files = [
-                f for f in os.listdir(self.temp_dir) 
-                if f.endswith('.vtt') and self.video_id in f
-            ]
-            
-            if not subtitle_files:
-                log.warning("[TRANSCRIPT] No subtitle files downloaded")
-                return None
-            
-            # Find best matching subtitle file
-            best_file = self._find_best_subtitle_file(subtitle_files)
-            if best_file:
-                log.info(f"[TRANSCRIPT] Selected subtitle file: {best_file}")
-                return os.path.join(self.temp_dir, best_file)
-            
-            return None
-                
-        except Exception as e:
-            log.error(f"[TRANSCRIPT] Failed to download subtitles: {e}")
-            raise Exception(f"Could not download subtitles: {str(e)}")
+                ydl_opts = {
+                    'quiet': True,
+                    'skip_download': True,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': [lang],
+                    'subtitlesformat': 'vtt',
+                    'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),
+                    'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+                }
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([self.url])
+
+                # Collect downloaded subtitle files matching this video
+                subtitle_files = [
+                    f for f in os.listdir(self.temp_dir)
+                    if (f.endswith('.vtt') or f.endswith('.srt')) and self.video_id in f
+                ]
+
+                if not subtitle_files:
+                    log.warning(f"[TRANSCRIPT] No subtitles found for language '{lang}'")
+                    continue
+
+                # Pick best file among downloaded
+                best_file = self._find_best_subtitle_file(subtitle_files)
+                if best_file:
+                    log.info(f"[TRANSCRIPT] Selected subtitle file: {best_file}")
+                    return os.path.join(self.temp_dir, best_file)
+
+            except Exception as e:
+                log.warning(f"[TRANSCRIPT] Subtitle download for '{lang}' failed: {e}")
+                continue
+
+        # No subtitles in either preferred or English
+        return None
 
     def _find_best_subtitle_file(self, subtitle_files: List[str]) -> Optional[str]:
         """Find the best subtitle file based on language preference."""
