@@ -9,9 +9,11 @@ from telegram.ext import ContextTypes, Application
 
 from .tasks.task import Task
 from .tasks.download_task import DownloadTask
+from .tasks.transcript_task import TranscriptTask
+
 from .utils.logging_utils import log
 from .utils.config_utils import ALLOWED_USERS, TARGET_CHANNEL
-from .utils.db_utils import init_db, mark_as_processed
+from .utils.db_utils import init_db, mark_as_processed, is_transcript_processed, mark_transcript_processed
 from .utils.cookies_utils import cookies_available, COOKIES_FILE
 from .utils.utils import clean_youtube_url, parse_log_time, get_video_id
 
@@ -199,6 +201,68 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     running_tasks.add(task)
     await task_queue.put(task)
 
+async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handler for /transcript: enqueue or retry a transcript task.
+    """
+    msg = update.message or update.channel_post
+    uid = update.effective_user.id
+    cid = update.effective_chat.id
+    log.info(f"[COMMAND] /transcript from user {uid} in chat {cid}")
+
+    if uid not in ALLOWED_USERS: # For transcript, user authorization is enough
+        log.warning(f"[BLOCKED] Unauthorized user {uid} for /transcript")
+        return await msg.reply_text("🚫 Not authorized.")
+
+    if not context.args:
+        return await msg.reply_text("📎 Please provide a YouTube link.")
+
+    url = clean_youtube_url(context.args[0])
+    if not url:
+        return await msg.reply_text("❌ Invalid YouTube URL.")
+
+    vid = get_video_id(url)
+    if not vid:
+        return await msg.reply_text("❌ Could not extract video ID.")
+
+    # DB status check (using the simpler is_transcript_processed from before language feature)
+    # This will need db_utils.is_transcript_processed to be reverted too if it was changed to return a tuple
+    with closing(sqlite3.connect(os.getenv('DB_PATH', 'data/bot.db'))) as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT status FROM processed_transcripts WHERE chat_id = ? AND video_id = ?",
+            (cid, vid)
+        )
+        row = c.fetchone()
+        status = row[0] if row else None
+
+    if status == "success": # Simple check for success
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔁 Retry Transcript", callback_data=f"retry_transcript|{vid}|{url}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_transcript|{vid}")
+        ]])
+        return await msg.reply_text(
+            "✅ Transcript was already generated.\nRetry?",
+            reply_markup=keyboard
+        )
+    
+    # Check if it's currently processing (simplified, might need a proper check like for downloads)
+    is_already_running_or_queued = any(
+        isinstance(t, TranscriptTask) and 
+        t.video_id == vid and 
+        t.update.effective_chat.id == cid
+        for t in running_tasks.union({item for item in task_queue._queue})
+    )
+    if status == "processing" and is_already_running_or_queued:
+        await msg.reply_text("⏳ This transcript is currently being processed.", parse_mode="Markdown")
+        return
+
+    status_msg = await msg.reply_text("✅ Queued transcript task…")
+    mark_transcript_processed(cid, vid, status_msg.message_id, "processing") # transcript_lang not passed
+    task = TranscriptTask(update, context, status_msg, url) # target_lang_code not passed
+    running_tasks.add(task)
+    await task_queue.put(task)
+
 
 async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -239,18 +303,38 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     :param update: Telegram Update.
     :param context: Callback context.
     """
-    if not is_allowed(update):
+    if update.effective_user.id not in ALLOWED_USERS:
+        log.warning(f"[BLOCKED] Unauthorized user {update.effective_user.id} tried /tasks")
         return
 
     log.info(f"[COMMAND] /tasks from user {update.effective_user.id}")
-    if not running_tasks:
-        return await update.message.reply_text("✅ No tasks running.")
+    
+    # Ensure running_tasks contains actual Task objects
+    active_task_details = []
+    for t in running_tasks:
+        if hasattr(t, 'user_id') and hasattr(t, 'created_at') and hasattr(t, 'url'):
+            # Check if created_at is datetime or float (from asyncio.loop.time())
+            created_time_str = ""
+            if isinstance(t.created_at, datetime):
+                created_time_str = t.created_at.strftime('%H:%M:%S')
+            elif isinstance(t.created_at, float): # Handle asyncio.loop.time()
+                # This won't be a human-readable time directly, maybe just indicate it's running
+                 created_time_str = "Running" # Or convert to relative time if needed
+            
+            task_type = type(t).__name__ # Get class name (e.g., DownloadTask, TranscriptTask)
+            task_url_display = t.url if len(t.url) < 50 else t.url[:47] + "..."
 
-    lines = [
-        f"👤 {t.user_id}, ⏱️ {t.created_at.strftime('%H:%M:%S')}, 🔗 {t.url}"
-        for t in running_tasks
-    ]
-    await update.message.reply_text("\n".join(lines))
+            active_task_details.append(
+                f"👤 {t.user_id}, ⏱️ {created_time_str}, 🔗 {task_url_display} ({task_type})"
+            )
+        else: # Fallback for generic Task objects or if attributes are missing
+            active_task_details.append(f"Task: {type(t).__name__} (details unavailable)")
+
+
+    if not active_task_details:
+        return await update.message.reply_text("✅ No tasks running.")
+        
+    await update.message.reply_text("\n".join(active_task_details))
 
 
 async def message_logger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -271,7 +355,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     :param update: Telegram Update.
     :param context: Callback context.
     """
-    query: CallbackQuery = update.callback_query  # type: ignore
+    query: CallbackQuery = update.callback_query
     await query.answer()
     parts = query.data.split("|")
     action = parts[0]
@@ -280,19 +364,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if action == "cancel":
         vid = parts[1] if len(parts) > 1 else "unknown"
-        log.info(f"[CANCEL] User {uid} canceled {vid}")
-        return await query.edit_message_text("❌ Canceled")
+        log.info(f"[CANCEL] User {uid} canceled download {vid}")
+        return await query.edit_message_text("❌ Download Canceled")
 
     if action == "retry" and len(parts) == 3:
         vid, url = parts[1], parts[2]
-        log.info(f"[RETRY] User {uid} retry {vid}")
+        log.info(f"[RETRY] User {uid} retry download {vid}")
         await query.edit_message_text("🔁 Re-downloading...")
         mark_as_processed(cid, vid, query.message.message_id, "processing")
         task = DownloadTask(update, context, query.message, url, query.message.message_id)
         running_tasks.add(task)
         await task_queue.put(task)
-    else:
-        await query.edit_message_text("❌ Invalid action.")
+        return # Explicit return after handling download retry
+
+    if action == "cancel_transcript":
+        vid = parts[1] if len(parts) > 1 else "unknown"
+        log.info(f"[CANCEL TRANSCRIPT] User {uid} canceled transcript for {vid}")
+        return await query.edit_message_text("❌ Transcript canceled")
+
+    if action == "retry_transcript" and len(parts) == 3:
+        vid, url = parts[1], parts[2]
+        log.info(f"[RETRY TRANSCRIPT] User {uid} retry transcript for {vid}")
+        await query.edit_message_text("🔁 Re-queuing transcript…")
+        mark_transcript_processed(cid, vid, query.message.message_id, "processing")
+        task = TranscriptTask(update, context, query.message, url) # No target_lang_code
+        running_tasks.add(task)
+        await task_queue.put(task)
+        return
+    
+    log.warning(f"[BUTTON_HANDLER] Unhandled action: {query.data}")
+    await query.edit_message_text("❌ Invalid or unhandled action.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

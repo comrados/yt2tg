@@ -1,8 +1,14 @@
 {
-    "bot_token": "BOT_TOKEN",
-    "allowed_users": [
-        987654321,
-        123456789
-    ],
-    "target_channel": -123456789
+    "telegram": {
+        "bot_token": "BOT_TOKEN",
+        "allowed_users": [
+            987654321,
+            123456789
+        ],
+        "target_channel": -123456789
+    },
+    "gemeni": {
+        "gemini_api_key": "YOUR_GEMINI_API_KEY",
+        "chosen_model": "models/gemini-2.5-flash-preview-05-20"
+    }
 }

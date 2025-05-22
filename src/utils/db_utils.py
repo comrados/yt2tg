@@ -24,6 +24,15 @@ def init_db(db_path: str = DB_PATH) -> None:
                 PRIMARY KEY (chat_id, video_id)
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS processed_transcripts (
+                chat_id    INTEGER,
+                video_id   TEXT,
+                message_id INTEGER,
+                status     TEXT,
+                PRIMARY KEY (chat_id, video_id)
+            )
+        """)
         conn.commit()
 
 def is_already_processed(chat_id: int, video_id: str, db_path: str = DB_PATH) -> bool:
@@ -69,3 +78,36 @@ def mark_as_processed(
         )
         conn.commit()
     logging.info(f"[DB] Marked video {video_id} in chat {chat_id} as '{status}'")
+
+def mark_transcript_processed(
+    chat_id: int,
+    video_id: str,
+    message_id: int,
+    status: str,
+    db_path: str = DB_PATH
+) -> None:
+    """
+    Insert or update the processing status of a transcript in the database.
+    """
+    with closing(sqlite3.connect(db_path)) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO processed_transcripts (chat_id, video_id, message_id, status) VALUES (?, ?, ?, ?)",
+            (chat_id, video_id, message_id, status)
+        )
+        conn.commit()
+    logging.info(f"[DB] Marked transcript {video_id} in chat {chat_id} as '{status}'")
+
+def is_transcript_processed(chat_id: int, video_id: str, db_path: str = DB_PATH) -> bool:
+    """
+    Check whether a given transcript in a chat has already been processed successfully.
+    """
+    with closing(sqlite3.connect(db_path)) as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT status FROM processed_transcripts WHERE chat_id = ? AND video_id = ?",
+            (chat_id, video_id)
+        )
+        result = c.fetchone()
+        logging.info(f"[DB] Checked if transcript {video_id} in chat {chat_id} is already processed: {result}")
+        return bool(result and result[0] == "success")

@@ -24,6 +24,8 @@ A Telegram bot that downloads YouTube videos and forwards them to a specified Te
 │   ├── handlers.py              # all Telegram handlers
 │   ├── tasks/
 │   │   └── download_task.py     # download-and-send task logic
+│   │   ├── transcript_task.py   # video transcription task logic
+│   │   └── task.py              # base task class
 │   └── utils/
 │       ├── logging_utils.py     # logging setup
 │       ├── db_utils.py          # SQLite database helpers
@@ -31,9 +33,13 @@ A Telegram bot that downloads YouTube videos and forwards them to a specified Te
 │       ├── cookies_utils.py     # YouTube cookies validation
 │       └── utils.py             # misc helpers (URL parsing, log timestamps)
 ├── config.json                  # bot token, allowed users, target channel
+├── cookies.txt                  # cookies file for access to restricted videos
 ├── Dockerfile                   # container definition
 ├── docker-compose.yml           # compose configuration
 ├── requirements.txt             # Python dependencies
+├── .gitignore                   # git exceptions
+├── .dockerignore                # docker ewxceptions
+├── README.md                    # this file
 ├── data/                        # persistent SQLite database
 └── logs/                        # persistent log files
 ```
@@ -45,6 +51,8 @@ A Telegram bot that downloads YouTube videos and forwards them to a specified Te
 - Telegram bot token (from [@BotFather](https://telegram.me/BotFather))
 - Your Telegram user ID
 - Target Telegram channel ID (if sending to a channel)
+- A Google Gemini API key (set in `config.json` under `gemeni.gemini_api_key`)
+- Docker Compose will pass `TZ=Europe/Berlin` to the container for correct timestamps
 
 *Note: You might need to run `docker` and `docker-compose` commands with `sudo`. To run Docker commands without `sudo`, add your user to the `docker` group using `sudo usermod -aG docker $USER`. You will need to log out and log back in (or reboot the system) for this change to take effect.*
 
@@ -138,12 +146,18 @@ Replace with your values:
 
 ```json
 {
+  "telegram": {
     "bot_token": "YOUR_BOT_TOKEN",
     "allowed_users": [
-        YOUR_USER_ID,
-        ANOTHER_ALLOWED_USER_ID
+      123456789,
+      987654321
     ],
-    "target_channel": YOUR_CHANNEL_ID
+    "target_channel": -123456789
+  },
+  "gemeni": {
+    "gemini_api_key": "YOUR_GEMINI_API_KEY",
+    "chosen_model": "models/gemini-2.5-flash-preview-05-20"
+  }
 }
 ```
 
@@ -170,11 +184,15 @@ Use `sudo docker-compose up --build -d`, if standalone Docker Compose was instal
 
 ## Bot Usage
 
-- `/id` - Get your Telegram user ID and current chat ID
-- `/download <YouTube URL>` - Download a video and send it to you or the configured channel
-- `/logs` - Get logs from the last 60 minutes (admin only)
-- `/tasks` - List currently running tasks (admin only)
-- `/checkcookies` - Check if YouTube cookies are valid and view cookie expiration information (admin only)
+| Command                             | Description                                      |
+|-------------------------------------|--------------------------------------------------|
+| `/id`                               | Get your Telegram user ID and current chat ID    |
+| `/download <YouTube URL>`           | Download a video and send it to you or channel   |
+| `/transcript <YouTube URL>`         | Fetch, clean & summarize transcript              |
+| `/logs`                             | Get logs from the last 60 minutes (admin only)   |
+| `/tasks`                            | List currently running tasks (admin only)        |
+| `/checkcookies`                     | Check cookie validity & expiration (admin only)  |
+
 
 ## Technical Details
 
@@ -185,6 +203,12 @@ Use `sudo docker-compose up --build -d`, if standalone Docker Compose was instal
 - Each split has a 5-second overlap for better viewing experience
 - FFmpeg is used for video splitting
 - Downloaded videos are cleaned up after processing
+
+### Transcript Processing
+- Uses a two-pass Google Gemini workflow:
+  1. **Clean & structure** raw transcript into numbered paragraphs (FIRST_PROMPT).  
+  2. **Summarize** the cleaned text, preserving structure (SECOND_PROMPT).
+- Depends on `google-genai` for Gemini API.
 
 ### YouTube Cookies Configuration
 

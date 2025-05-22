@@ -8,7 +8,7 @@ from .utils.config_utils import BOT_TOKEN
 from .handlers import (
     error_handler, id_command, download_command, logs_command,
     tasks_command, check_cookies_command, message_logger,
-    button_handler, start_worker
+    button_handler, start_worker, transcript_command
 )
 
 # --- Launch ---
@@ -29,6 +29,7 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("download", download_command))
+    app.add_handler(CommandHandler("transcript", transcript_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("checkcookies", check_cookies_command))
